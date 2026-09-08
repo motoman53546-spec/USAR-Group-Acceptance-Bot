@@ -54,7 +54,6 @@ class HighCommandReviewView(discord.ui.View):
     config = SERVER_CONFIGS.get(interaction.guild_id, {})
     accepter_role_id = config.get("accepter_role")
 
-    # Check if user has the configured accepter role OR administrator permissions
     has_permission = interaction.user.guild_permissions.administrator
     if accepter_role_id and not has_permission:
       role = interaction.guild.get_role(accepter_role_id)
@@ -220,8 +219,8 @@ async def setup_accepter_role(
 @bot.tree.command(
     name="setup-channel",
     description=(
-        "Set the designated channel where group requests will be sent (Admin"
-        " only)."
+        "Set the designated channel where group requests must be submitted"
+        " (Admin only)."
     ),
 )
 @app_commands.default_permissions(administrator=True)
@@ -262,9 +261,22 @@ async def grouprequest(
     proof: discord.Attachment,
 ):
   config = SERVER_CONFIGS.get(interaction.guild_id, {})
-  requester_role_id = config.get("requester_role")
+  target_channel_id = config.get("target_channel")
 
-  # Permission verification for submission
+  # Enforce channel restriction if a setup channel exists
+  if target_channel_id and interaction.channel_id != target_channel_id:
+    target_channel = interaction.guild.get_channel(target_channel_id)
+    channel_mention = (
+        target_channel.mention if target_channel else "the designated channel"
+    )
+    await interaction.response.send_message(
+        f"❌ You can only use the `/grouprequest` command inside"
+        f" {channel_mention}!",
+        ephemeral=True,
+    )
+    return
+
+  requester_role_id = config.get("requester_role")
   can_submit = interaction.user.guild_permissions.administrator
   if requester_role_id and not can_submit:
     role = interaction.guild.get_role(requester_role_id)
@@ -305,8 +317,6 @@ async def grouprequest(
       instructor=interaction.user,
   )
 
-  # Determine destination channel (uses configured channel or falls back to current channel)
-  target_channel_id = config.get("target_channel")
   dest_channel = (
       interaction.guild.get_channel(target_channel_id)
       if target_channel_id
@@ -324,7 +334,7 @@ async def grouprequest(
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Setup & Multi-group Bot Online!")
+  print(f"Logged in as {bot.user} - Channel Restricted Bot Online!")
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
