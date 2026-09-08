@@ -1,5 +1,6 @@
 import os
 import discord
+from discord import app_commands
 from discord.ext import commands
 import requests
 
@@ -9,9 +10,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 ROBLOX_API_KEY = os.getenv("ROBLOX_API_KEY")
 
-# Dictionary mapping friendly names to your Roblox Group IDs
 GROUP_IDS = {
-    "MPC": "33846212",
+    "Military Police Corps": "33846212",
     "ASOC": "16997678",
     "AAC": "33333333",
     "TRADOC": "44444444",
@@ -19,38 +19,99 @@ GROUP_IDS = {
 }
 
 
-class GroupQueueView(discord.ui.View):
+class HighCommandReviewView(discord.ui.View):
 
-  def __init__(self, username: str, join_request_path: str, group_name: str):
-    super().__init__(timeout=180)
+  def __init__(
+      self,
+      username: str,
+      group_name: str,
+      division: str,
+      company: str,
+      notes: str,
+      proof_url: str,
+      instructor: discord.User,
+  ):
+    super().__init__(timeout=None)
     self.username = username
-    self.join_request_path = join_request_path
     self.group_name = group_name
+    self.division = division
+    self.company = company
+    self.notes = notes
+    self.proof_url = proof_url
+    self.instructor = instructor
 
   @discord.ui.button(
-      label="Accept", style=discord.ButtonStyle.green, custom_id="accept_multi"
+      label="Approve & Send Request",
+      style=discord.ButtonStyle.green,
+      custom_id="hc_accept",
   )
-  async def accept_user(
+  async def approve_request(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
     if not interaction.user.guild_permissions.manage_roles:
       await interaction.response.send_message(
-          "You do not have permission to manage acceptances.", ephemeral=True
+          "Only High Command can approve tryout request logs.", ephemeral=True
       )
       return
 
-    # Defer immediately to prevent interaction token timeouts
     await interaction.response.defer()
 
-    # Roblox Open Cloud v2 Accept Endpoint
-    url = f"https://apis.roblox.com/cloud/v2/{self.join_request_path}:accept"
-    headers = {
+    # Step 1: Find the Roblox user ID from the username provided
+    user_search_url = (
+        f"https://users.roblox.com/v1/users/search?keyword={self.username}"
+    )
+    user_resp = requests.get(user_search_url)
+
+    if user_resp.status_code != 200 or not user_resp.json().get("data"):
+      await interaction.followup.send(
+          f"Failed to find Roblox user `{self.username}` via search API.",
+          ephemeral=True,
+      )
+      return
+
+    user_data = user_resp.json()["data"][0]
+    roblox_user_id = user_data["id"]
+
+    group_id = GROUP_IDS.get(self.group_name)
+    if not group_id:
+      await interaction.followup.send(
+          f"Invalid group mapping for `{self.group_name}`.", ephemeral=True
+      )
+      return
+
+    # Step 2: Check or hit Roblox Open Cloud to post/verify join request queue
+    # Note: Roblox Open Cloud v2 requires the user to already have an active join request
+    # in the group to accept them via API. Let's list pending requests to find their specific path.
+    requests_url = (
+        f"https://apis.roblox.com/cloud/v2/groups/{group_id}/join-requests"
+    )
+    headers = {"x-api-key": ROBLOX_API_KEY}
+    get_reqs = requests.get(requests_url, headers=headers)
+
+    target_request_path = None
+    if get_reqs.status_code == 200:
+      for req in get_reqs.json().get("groupJoinRequests", []):
+        # req['user'] looks like 'users/12345678'
+        if req.get("user", "").endswith(str(roblox_user_id)):
+          target_request_path = req.get("path")
+          break
+
+    if not target_request_path:
+      await interaction.followup.send(
+          f"⚠️ **{self.username}** has not sent a manual join request in the"
+          f" Roblox group (**{self.group_name}**) yet! Have them request to join"
+          " on Roblox first, then click approve again.",
+          ephemeral=True,
+      )
+      return
+
+    # Step 3: Accept via Open Cloud v2 endpoint
+    accept_url = f"https://apis.roblox.com/cloud/v2/{target_request_path}:accept"
+    accept_headers = {
         "x-api-key": ROBLOX_API_KEY,
         "Content-Type": "application/json",
     }
-
-    # Added json={} so the request payload is correctly formatted for Roblox
-    response = requests.post(url, headers=headers, json={})
+    response = requests.post(accept_url, headers=accept_headers, json={})
 
     for child in self.children:
       child.disabled = True
@@ -62,37 +123,31 @@ class GroupQueueView(discord.ui.View):
 
     if response.status_code == 200:
       await interaction.followup.send(
-          f"Successfully accepted **{self.username}** into **{self.group_name}**"
-          f" via {interaction.user.mention}!",
+          f"Successfully approved and admitted **{self.username}** into"
+          f" **{self.group_name}** ({self.division} / {self.company}) by High"
+          f" Command {interaction.user.mention}!",
           ephemeral=False,
       )
     else:
       await interaction.followup.send(
-          f"Failed to accept user. Error: `{response.text}`", ephemeral=True
+          f"Failed to process Roblox group acceptance. Error:"
+          f" `{response.text}`",
+          ephemeral=True,
       )
 
   @discord.ui.button(
-      label="Deny", style=discord.ButtonStyle.red, custom_id="deny_multi"
+      label="Deny Request", style=discord.ButtonStyle.red, custom_id="hc_deny"
   )
-  async def deny_user(
+  async def deny_request(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
     if not interaction.user.guild_permissions.manage_roles:
       await interaction.response.send_message(
-          "You do not have permission to manage acceptances.", ephemeral=True
+          "Only High Command can manage requests.", ephemeral=True
       )
       return
 
     await interaction.response.defer()
-
-    url = f"https://apis.roblox.com/cloud/v2/{self.join_request_path}:decline"
-    headers = {
-        "x-api-key": ROBLOX_API_KEY,
-        "Content-Type": "application/json",
-    }
-
-    # Added json={} here as well to keep the POST payload formatted properly
-    response = requests.post(url, headers=headers, json={})
 
     for child in self.children:
       child.disabled = True
@@ -103,82 +158,75 @@ class GroupQueueView(discord.ui.View):
       pass
 
     await interaction.followup.send(
-        f"Declined join request for **{self.username}** in"
-        f" **{self.group_name}**.",
+        f"Tryout log request for **{self.username}** was denied by"
+        f" {interaction.user.mention}.",
         ephemeral=False,
     )
 
 
 @bot.tree.command(
-    name="requests",
-    description="View pending join requests for a specific military group.",
+    name="grouprequest",
+    description="Submit a tryout completion log for High Command review.",
 )
-@discord.app_commands.choices(
+@app_commands.choices(
     branch=[
-        discord.app_commands.Choice(name="ASOC", value="ASOC"),
-        discord.app_commands.Choice(name="MPC", value="MPC"),
-        discord.app_commands.Choice(name="AAC", value="AAC"),
-        discord.app_commands.Choice(name="TRADOC", value="TRADOC"),
-        discord.app_commands.Choice(name="FORSCOM", value="FORSCOM"),
+        app_commands.Choice(
+            name="Military Police Corps", value="Military Police Corps"
+        ),
+        app_commands.Choice(name="ASOC", value="ASOC"),
+        app_commands.Choice(name="AAC", value="AAC"),
+        app_commands.Choice(name="TRADOC", value="TRADOC"),
+        app_commands.Choice(name="FORSCOM", value="FORSCOM"),
     ]
 )
-async def requests_cmd(
-    interaction: discord.Interaction, branch: discord.app_commands.Choice[str]
+async def grouprequest(
+    interaction: discord.Interaction,
+    username: str,
+    branch: app_commands.Choice[str],
+    division: str,
+    company: str,
+    notes: str,
+    proof: discord.Attachment,
 ):
-  if not interaction.user.guild_permissions.manage_roles:
-    await interaction.response.send_message(
-        "You do not have permission to view group requests.", ephemeral=True
-    )
-    return
-
   await interaction.response.defer(ephemeral=True)
 
-  group_id = GROUP_IDS.get(branch.value)
-  url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/join-requests"
-  headers = {"x-api-key": ROBLOX_API_KEY}
-
-  response = requests.get(url, headers=headers)
-
-  if response.status_code != 200:
-    await interaction.followup.send(
-        f"Failed to fetch requests for {branch.name}. Status Code:"
-        f" `{response.status_code}`",
-        ephemeral=True,
-    )
-    return
-
-  data = response.json().get("groupJoinRequests", [])
-
-  if not data:
-    await interaction.followup.send(
-        f"There are no pending join requests for **{branch.name}**.",
-        ephemeral=True,
-    )
-    return
-
-  # Grab the first request in the queue
-  first_req = data[0]
-  user_path = first_req.get("user")
-  req_path = first_req.get("path")
-
   embed = discord.Embed(
-      title=f"Pending Join Request — {branch.name}",
-      description=(
-          f"**User ID Path:** `{user_path}`\n**Request Path:** `{req_path}`"
-      ),
-      color=discord.Color.dark_blue(),
+      title="Tryout Proof / Group Acceptance Log",
+      description="A new tryout result has been submitted for review.",
+      color=discord.Color.dark_red(),
+  )
+  embed.add_field(name="Attendee Username", value=username, inline=True)
+  embed.add_field(name="Group Branch", value=branch.name, inline=True)
+  embed.add_field(name="Division", value=division, inline=True)
+  embed.add_field(name="Company", value=company, inline=True)
+  embed.add_field(name="Notes / Result", value=notes, inline=False)
+  embed.add_field(name="Tested By", value=interaction.user.mention, inline=True)
+  embed.set_image(url=proof.url)
+  embed.set_footer(text="Waiting for High Command Approval...")
+
+  view = HighCommandReviewView(
+      username=username,
+      group_name=branch.name,
+      division=division,
+      company=company,
+      notes=notes,
+      proof_url=proof.url,
+      instructor=interaction.user,
   )
 
-  view = GroupQueueView(
-      username=user_path, join_request_path=req_path, group_name=branch.name
+  # Send the log embed into the current channel (or designate a logging channel ID if preferred)
+  await interaction.channel.send(embed=embed, view=view)
+  await interaction.followup.send(
+      "Your tryout request log has been successfully published for High Command"
+      " review!",
+      ephemeral=True,
   )
-  await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Multi-group bot online!")
+  print(f"Logged in as {bot.user} - Tryout Log Bot Online!")
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
