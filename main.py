@@ -49,7 +49,8 @@ class GroupQueueView(discord.ui.View):
         "Content-Type": "application/json",
     }
 
-    response = requests.post(url, headers=headers)
+    # Added json={} so the request payload is correctly formatted for Roblox
+    response = requests.post(url, headers=headers, json={})
 
     for child in self.children:
       child.disabled = True
@@ -90,7 +91,8 @@ class GroupQueueView(discord.ui.View):
         "Content-Type": "application/json",
     }
 
-    response = requests.post(url, headers=headers)
+    # Added json={} here as well to keep the POST payload formatted properly
+    response = requests.post(url, headers=headers, json={})
 
     for child in self.children:
       child.disabled = True
