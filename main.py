@@ -72,6 +72,7 @@ class HighCommandReviewView(discord.ui.View):
 
     await interaction.response.defer()
 
+    # 1. Resolve Roblox User ID
     user_search_url = (
         f"https://users.roblox.com/v1/users/search?keyword={self.username}"
     )
@@ -95,8 +96,8 @@ class HighCommandReviewView(discord.ui.View):
       return
 
     headers = {"x-api-key": ROBLOX_API_KEY}
-    member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
 
+    # 2. Find target Role ID from Cloud V2 or V1 fallback
     roles_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
     roles_resp = requests.get(roles_url, headers=headers)
     target_role_id = None
@@ -117,23 +118,78 @@ class HighCommandReviewView(discord.ui.View):
             target_role_id = str(r.get("id"))
             break
 
+    # 3. Check Membership or Accept Join Request
+    member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
     member_resp = requests.get(member_url, headers=headers)
-    if member_resp.status_code == 200 and target_role_id:
-      patch_headers = {
-          "x-api-key": ROBLOX_API_KEY,
-          "Content-Type": "application/json",
-      }
-      update_resp = requests.patch(
-          member_url,
-          headers=patch_headers,
-          json={"role": f"groups/{group_id}/roles/{target_role_id}"},
+
+    if member_resp.status_code == 200:
+      # Already in group -> Update rank directly
+      if target_role_id:
+        patch_headers = {
+            "x-api-key": ROBLOX_API_KEY,
+            "Content-Type": "application/json",
+        }
+        update_resp = requests.patch(
+            member_url,
+            headers=patch_headers,
+            json={"role": f"groups/{group_id}/roles/{target_role_id}"},
+        )
+        if update_resp.status_code != 200:
+          await interaction.followup.send(
+              f"Failed to update member rank on Roblox: `{update_resp.text}`",
+              ephemeral=True,
+          )
+          return
+    else:
+      # Not in group -> Check for pending join request
+      requests_url = (
+          f"https://apis.roblox.com/cloud/v2/groups/{group_id}/join-requests"
       )
-      if update_resp.status_code != 200:
+      get_reqs = requests.get(requests_url, headers=headers)
+
+      target_request_path = None
+      if get_reqs.status_code == 200:
+        for req in get_reqs.json().get("groupJoinRequests", []):
+          if req.get("user", "").endswith(str(roblox_user_id)):
+            target_request_path = req.get("path")
+            break
+
+      if not target_request_path:
         await interaction.followup.send(
-            f"Failed to update member rank on Roblox: `{update_resp.text}`",
+            f"⚠️ **{self.username}** has not sent a manual join request in the"
+            f" Roblox group (**{self.command_name}**) yet! Have them request to"
+            " join on Roblox first, then click approve again.",
             ephemeral=True,
         )
         return
+
+      accept_url = (
+          f"https://apis.roblox.com/cloud/v2/{target_request_path}:accept"
+      )
+      accept_headers = {
+          "x-api-key": ROBLOX_API_KEY,
+          "Content-Type": "application/json",
+      }
+      response = requests.post(accept_url, headers=accept_headers, json={})
+
+      if response.status_code != 200:
+        await interaction.followup.send(
+            f"Failed to process Roblox group acceptance. Error:"
+            f" `{response.text}`",
+            ephemeral=True,
+        )
+        return
+
+      if target_role_id:
+        patch_headers = {
+            "x-api-key": ROBLOX_API_KEY,
+            "Content-Type": "application/json",
+        }
+        requests.patch(
+            member_url,
+            headers=patch_headers,
+            json={"role": f"groups/{group_id}/roles/{target_role_id}"},
+        )
 
     for child in self.children:
       child.disabled = True
@@ -144,7 +200,7 @@ class HighCommandReviewView(discord.ui.View):
       pass
 
     success_text = (
-        f"Successfully approved **{self.username}** into"
+        f"Successfully approved and admitted **{self.username}** into"
         f" **{self.command_name}** ({self.rank} - {self.division} /"
         f" {self.company}) by {interaction.user.mention}!"
     )
@@ -462,7 +518,7 @@ async def grouprequest(
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Fully restored command parameters!")
+  print(f"Logged in as {bot.user} - Full join-request and role assignment restored!")
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
