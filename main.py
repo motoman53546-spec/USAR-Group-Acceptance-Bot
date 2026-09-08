@@ -22,6 +22,18 @@ COMMAND_IDS = {
 SERVER_CONFIGS = {}
 
 
+def check_accepter_permission(interaction: discord.Interaction) -> bool:
+  config = SERVER_CONFIGS.get(interaction.guild_id, {})
+  accepter_role_id = config.get("accepter_role")
+
+  has_permission = interaction.user.guild_permissions.administrator
+  if accepter_role_id and not has_permission:
+    role = interaction.guild.get_role(accepter_role_id)
+    if role and role in interaction.user.roles:
+      has_permission = True
+  return has_permission
+
+
 class HighCommandReviewView(discord.ui.View):
 
   def __init__(
@@ -53,16 +65,7 @@ class HighCommandReviewView(discord.ui.View):
   async def approve_request(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
-    config = SERVER_CONFIGS.get(interaction.guild_id, {})
-    accepter_role_id = config.get("accepter_role")
-
-    has_permission = interaction.user.guild_permissions.administrator
-    if accepter_role_id and not has_permission:
-      role = interaction.guild.get_role(accepter_role_id)
-      if role and role in interaction.user.roles:
-        has_permission = True
-
-    if not has_permission:
+    if not check_accepter_permission(interaction):
       await interaction.response.send_message(
           "You do not have the required Group Accepter role or Administrator"
           " permissions to approve requests.",
@@ -72,7 +75,6 @@ class HighCommandReviewView(discord.ui.View):
 
     await interaction.response.defer()
 
-    # 1. Resolve Roblox User ID
     user_search_url = (
         f"https://users.roblox.com/v1/users/search?keyword={self.username}"
     )
@@ -97,7 +99,6 @@ class HighCommandReviewView(discord.ui.View):
 
     headers = {"x-api-key": ROBLOX_API_KEY}
 
-    # 2. Find target Role ID from Cloud V2 or V1 fallback
     roles_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
     roles_resp = requests.get(roles_url, headers=headers)
     target_role_id = None
@@ -118,12 +119,10 @@ class HighCommandReviewView(discord.ui.View):
             target_role_id = str(r.get("id"))
             break
 
-    # 3. Check Membership or Accept Join Request
     member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
     member_resp = requests.get(member_url, headers=headers)
 
     if member_resp.status_code == 200:
-      # Already in group -> Update rank directly
       if target_role_id:
         patch_headers = {
             "x-api-key": ROBLOX_API_KEY,
@@ -141,7 +140,6 @@ class HighCommandReviewView(discord.ui.View):
           )
           return
     else:
-      # Not in group -> Check for pending join request
       requests_url = (
           f"https://apis.roblox.com/cloud/v2/groups/{group_id}/join-requests"
       )
@@ -206,6 +204,7 @@ class HighCommandReviewView(discord.ui.View):
     )
     await interaction.followup.send(success_text, ephemeral=False)
 
+    config = SERVER_CONFIGS.get(interaction.guild_id, {})
     acceptor_log_id = config.get("acceptor_log_channel")
     if acceptor_log_id:
       log_channel = interaction.guild.get_channel(acceptor_log_id)
@@ -236,16 +235,7 @@ class HighCommandReviewView(discord.ui.View):
   async def deny_request(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
-    config = SERVER_CONFIGS.get(interaction.guild_id, {})
-    accepter_role_id = config.get("accepter_role")
-
-    has_permission = interaction.user.guild_permissions.administrator
-    if accepter_role_id and not has_permission:
-      role = interaction.guild.get_role(accepter_role_id)
-      if role and role in interaction.user.roles:
-        has_permission = True
-
-    if not has_permission:
+    if not check_accepter_permission(interaction):
       await interaction.response.send_message(
           "You do not have permission to manage requests.", ephemeral=True
       )
@@ -515,10 +505,189 @@ async def grouprequest(
   )
 
 
+# NEW: Direct Group Rank Update Command (Restricted to Accepters/Admins)
+@bot.tree.command(
+    name="changerank",
+    description="Directly change a member's rank in a Roblox group.",
+)
+@app_commands.choices(
+    command=[
+        app_commands.Choice(
+            name="Military Police Corps", value="Military Police Corps"
+        ),
+        app_commands.Choice(name="ASOC", value="ASOC"),
+        app_commands.Choice(name="AAC", value="AAC"),
+        app_commands.Choice(name="TRADOC", value="TRADOC"),
+        app_commands.Choice(name="FORSCOM", value="FORSCOM"),
+    ]
+)
+@app_commands.autocomplete(rank=rank_autocomplete)
+async def changerank(
+    interaction: discord.Interaction,
+    username: str,
+    command: app_commands.Choice[str],
+    rank: str,
+):
+  if not check_accepter_permission(interaction):
+    await interaction.response.send_message(
+        "❌ You do not have permission to change group ranks.", ephemeral=True
+    )
+    return
+
+  await interaction.response.defer(ephemeral=True)
+
+  user_search_url = (
+      f"https://users.roblox.com/v1/users/search?keyword={username}"
+  )
+  user_resp = requests.get(user_search_url)
+
+  if user_resp.status_code != 200 or not user_resp.json().get("data"):
+    await interaction.followup.send(
+        f"Failed to find Roblox user `{username}` via search API.",
+        ephemeral=True,
+    )
+    return
+
+  user_data = user_resp.json()["data"][0]
+  roblox_user_id = user_data["id"]
+
+  group_id = COMMAND_IDS.get(command.name)
+  if not group_id:
+    await interaction.followup.send(
+        f"Invalid command mapping for `{command.name}`.", ephemeral=True
+    )
+    return
+
+  headers = {"x-api-key": ROBLOX_API_KEY}
+
+  roles_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
+  roles_resp = requests.get(roles_url, headers=headers)
+  target_role_id = None
+
+  if roles_resp.status_code == 200:
+    for r in roles_resp.json().get("groupRoles", []):
+      if r.get("displayName", "").lower() == rank.lower():
+        path_parts = r.get("path", "").split("/")
+        target_role_id = path_parts[-1] if path_parts else None
+        break
+
+  if not target_role_id:
+    v1_roles_url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
+    v1_resp = requests.get(v1_roles_url)
+    if v1_resp.status_code == 200:
+      for r in v1_resp.json().get("roles", []):
+        if r.get("name", "").lower() == rank.lower():
+          target_role_id = str(r.get("id"))
+          break
+
+  if not target_role_id:
+    await interaction.followup.send(
+        f"⚠️ Could not find exact Roblox role ID for rank `{rank}`.",
+        ephemeral=True,
+    )
+    return
+
+  member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
+  patch_headers = {
+      "x-api-key": ROBLOX_API_KEY,
+      "Content-Type": "application/json",
+  }
+  update_resp = requests.patch(
+      member_url,
+      headers=patch_headers,
+      json={"role": f"groups/{group_id}/roles/{target_role_id}"},
+  )
+
+  if update_resp.status_code != 200:
+    await interaction.followup.send(
+        f"Failed to update rank on Roblox: `{update_resp.text}`",
+        ephemeral=True,
+    )
+    return
+
+  await interaction.followup.send(
+      f"✅ Successfully updated **{username}'s** rank to **{rank}** in"
+      f" **{command.name}**!",
+      ephemeral=False,
+  )
+
+
+# NEW: Direct Group Kick Command (Restricted to Accepters/Admins)
+@bot.tree.command(
+    name="groupkick", description="Kick a member from a Roblox group."
+)
+@app_commands.choices(
+    command=[
+        app_commands.Choice(
+            name="Military Police Corps", value="Military Police Corps"
+        ),
+        app_commands.Choice(name="ASOC", value="ASOC"),
+        app_commands.Choice(name="AAC", value="AAC"),
+        app_commands.Choice(name="TRADOC", value="TRADOC"),
+        app_commands.Choice(name="FORSCOM", value="FORSCOM"),
+    ]
+)
+async def groupkick(
+    interaction: discord.Interaction,
+    username: str,
+    command: app_commands.Choice[str],
+):
+  if not check_accepter_permission(interaction):
+    await interaction.response.send_message(
+        "❌ You do not have permission to kick members from the group.",
+        ephemeral=True,
+    )
+    return
+
+  await interaction.response.defer(ephemeral=True)
+
+  user_search_url = (
+      f"https://users.roblox.com/v1/users/search?keyword={username}"
+  )
+  user_resp = requests.get(user_search_url)
+
+  if user_resp.status_code != 200 or not user_resp.json().get("data"):
+    await interaction.followup.send(
+        f"Failed to find Roblox user `{username}` via search API.",
+        ephemeral=True,
+    )
+    return
+
+  user_data = user_resp.json()["data"][0]
+  roblox_user_id = user_data["id"]
+
+  group_id = COMMAND_IDS.get(command.name)
+  if not group_id:
+    await interaction.followup.send(
+        f"Invalid command mapping for `{command.name}`.", ephemeral=True
+    )
+    return
+
+  headers = {"x-api-key": ROBLOX_API_KEY}
+  member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
+
+  kick_resp = requests.delete(member_url, headers=headers)
+
+  if kick_resp.status_code not in [200, 204]:
+    await interaction.followup.send(
+        f"Failed to kick member from Roblox group: `{kick_resp.text}`",
+        ephemeral=True,
+    )
+    return
+
+  await interaction.followup.send(
+      f"✅ Successfully kicked **{username}** from **{command.name}**!",
+      ephemeral=False,
+  )
+
+
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Full join-request and role assignment restored!")
+  print(
+      f"Logged in as {bot.user} - Added /changerank and /groupkick commands"
+      " with permission enforcement!"
+  )
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
