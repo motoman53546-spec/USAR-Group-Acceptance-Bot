@@ -3,6 +3,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import requests
+from datetime import datetime
 
 intents = discord.Intents.default()
 intents.members = True
@@ -18,7 +19,7 @@ GROUP_IDS = {
     "FORSCOM": "55555555",
 }
 
-# Storage for server-specific configurations (Guild ID -> Config Dict)
+# Storage for server configurations (Guild ID -> Config Dict)
 SERVER_CONFIGS = {}
 
 
@@ -130,12 +131,46 @@ class HighCommandReviewView(discord.ui.View):
       pass
 
     if response.status_code == 200:
-      await interaction.followup.send(
+      success_text = (
           f"Successfully approved and admitted **{self.username}** into"
           f" **{self.group_name}** ({self.division} / {self.company}) by"
-          f" {interaction.user.mention}!",
-          ephemeral=False,
+          f" {interaction.user.mention}!"
       )
+      await interaction.followup.send(success_text, ephemeral=False)
+
+      # Send a record into the designated Group Acceptor / Audit Log channel if configured
+      acceptor_log_id = config.get("acceptor_log_channel")
+      if acceptor_log_id:
+        log_channel = interaction.guild.get_channel(acceptor_log_id)
+        if log_channel:
+          log_embed = discord.Embed(
+              title="📋 Group Accepter Audit Log",
+              color=discord.Color.green(),
+              timestamp=datetime.utcnow(),
+          )
+          log_embed.add_field(
+              name="Accepter", value=interaction.user.mention, inline=True
+          )
+          log_embed.add_field(
+              name="Target User", value=self.username, inline=True
+          )
+          log_embed.add_field(
+              name="Branch / Group", value=self.group_name, inline=True
+          )
+          log_embed.add_field(
+              name="Division / Company",
+              value=f"{self.division} / {self.company}",
+              inline=True,
+          )
+          log_embed.add_field(
+              name="Action Status", value="Approved & Admitted", inline=True
+          )
+          log_embed.set_footer(
+              text=f"Accepter ID: {interaction.user.id}",
+              icon_url=interaction.user.display_avatar.url,
+          )
+          await log_channel.send(embed=log_embed)
+
     else:
       await interaction.followup.send(
           f"Failed to process Roblox group acceptance. Error:"
@@ -174,11 +209,39 @@ class HighCommandReviewView(discord.ui.View):
     except Exception:
       pass
 
-    await interaction.followup.send(
+    deny_text = (
         f"Tryout log request for **{self.username}** was denied by"
-        f" {interaction.user.mention}.",
-        ephemeral=False,
+        f" {interaction.user.mention}."
     )
+    await interaction.followup.send(deny_text, ephemeral=False)
+
+    # Log denial to acceptor audit log channel if configured
+    acceptor_log_id = config.get("acceptor_log_channel")
+    if acceptor_log_id:
+      log_channel = interaction.guild.get_channel(acceptor_log_id)
+      if log_channel:
+        log_embed = discord.Embed(
+            title="📋 Group Accepter Audit Log",
+            color=discord.Color.red(),
+            timestamp=datetime.utcnow(),
+        )
+        log_embed.add_field(
+            name="Accepter", value=interaction.user.mention, inline=True
+        )
+        log_embed.add_field(
+            name="Target User", value=self.username, inline=True
+        )
+        log_embed.add_field(
+            name="Branch / Group", value=self.group_name, inline=True
+        )
+        log_embed.add_field(
+            name="Action Status", value="Denied Request", inline=True
+        )
+        log_embed.set_footer(
+            text=f"Accepter ID: {interaction.user.id}",
+            icon_url=interaction.user.display_avatar.url,
+        )
+        await log_channel.send(embed=log_embed)
 
 
 # Admin Setup Commands
@@ -217,21 +280,41 @@ async def setup_accepter_role(
 
 
 @bot.tree.command(
-    name="setup-channel",
+    name="setup-request-channel",
     description=(
-        "Set the designated channel where group requests must be submitted"
-        " (Admin only)."
+        "Set the channel where /grouprequest must be run (Admin only)."
     ),
 )
 @app_commands.default_permissions(administrator=True)
-async def setup_channel(
+async def setup_request_channel(
     interaction: discord.Interaction, channel: discord.TextChannel
 ):
   if interaction.guild_id not in SERVER_CONFIGS:
     SERVER_CONFIGS[interaction.guild_id] = {}
-  SERVER_CONFIGS[interaction.guild_id]["target_channel"] = channel.id
+  SERVER_CONFIGS[interaction.guild_id]["request_channel"] = channel.id
   await interaction.response.send_message(
-      f"✅ Group request logs channel successfully set to {channel.mention}.",
+      f"✅ Group request input channel successfully set to {channel.mention}.",
+      ephemeral=True,
+  )
+
+
+@bot.tree.command(
+    name="setup-acceptor-log-channel",
+    description=(
+        "Set the audit log channel where acceptance records are posted (Admin"
+        " only)."
+    ),
+)
+@app_commands.default_permissions(administrator=True)
+async def setup_acceptor_log_channel(
+    interaction: discord.Interaction, channel: discord.TextChannel
+):
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["acceptor_log_channel"] = channel.id
+  await interaction.response.send_message(
+      f"✅ Group acceptance audit log channel successfully set to"
+      f" {channel.mention}.",
       ephemeral=True,
   )
 
@@ -261,11 +344,11 @@ async def grouprequest(
     proof: discord.Attachment,
 ):
   config = SERVER_CONFIGS.get(interaction.guild_id, {})
-  target_channel_id = config.get("target_channel")
+  request_channel_id = config.get("request_channel")
 
-  # Enforce channel restriction if a setup channel exists
-  if target_channel_id and interaction.channel_id != target_channel_id:
-    target_channel = interaction.guild.get_channel(target_channel_id)
+  # Enforce that /grouprequest can only be called in the dedicated request channel
+  if request_channel_id and interaction.channel_id != request_channel_id:
+    target_channel = interaction.guild.get_channel(request_channel_id)
     channel_mention = (
         target_channel.mention if target_channel else "the designated channel"
     )
@@ -317,9 +400,10 @@ async def grouprequest(
       instructor=interaction.user,
   )
 
+  # Send the review request to the same channel or use request channel
   dest_channel = (
-      interaction.guild.get_channel(target_channel_id)
-      if target_channel_id
+      interaction.guild.get_channel(request_channel_id)
+      if request_channel_id
       else interaction.channel
   )
 
@@ -334,7 +418,7 @@ async def grouprequest(
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Channel Restricted Bot Online!")
+  print(f"Logged in as {bot.user} - Full Audit Logging & Channels Online!")
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
