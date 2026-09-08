@@ -505,7 +505,7 @@ async def grouprequest(
   )
 
 
-# NEW: Direct Group Rank Update Command (Restricted to Accepters/Admins)
+# Direct Group Rank Update Command (Restricted to Accepters/Admins)
 @bot.tree.command(
     name="changerank",
     description="Directly change a member's rank in a Roblox group.",
@@ -612,9 +612,10 @@ async def changerank(
   )
 
 
-# NEW: Direct Group Kick Command (Restricted to Accepters/Admins)
+# Direct Group Kick / Demotion Command (Bypasses Open Cloud DELETE error)
 @bot.tree.command(
-    name="groupkick", description="Kick a member from a Roblox group."
+    name="groupkick",
+    description="Demote a member back to guest/unranked in a Roblox group.",
 )
 @app_commands.choices(
     command=[
@@ -634,7 +635,7 @@ async def groupkick(
 ):
   if not check_accepter_permission(interaction):
     await interaction.response.send_message(
-        "❌ You do not have permission to kick members from the group.",
+        "❌ You do not have permission to kick/demote members from the group.",
         ephemeral=True,
     )
     return
@@ -664,19 +665,58 @@ async def groupkick(
     return
 
   headers = {"x-api-key": ROBLOX_API_KEY}
-  member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
 
-  kick_resp = requests.delete(member_url, headers=headers)
+  roles_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
+  roles_resp = requests.get(roles_url, headers=headers)
+  lowest_role_id = None
+  lowest_rank_val = 999
 
-  if kick_resp.status_code not in [200, 204]:
+  if roles_resp.status_code == 200:
+    for r in roles_resp.json().get("groupRoles", []):
+      rank_val = r.get("rank", 999)
+      if rank_val < lowest_rank_val:
+        lowest_rank_val = rank_val
+        path_parts = r.get("path", "").split("/")
+        lowest_role_id = path_parts[-1] if path_parts else None
+
+  if not lowest_role_id:
+    v1_roles_url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
+    v1_resp = requests.get(v1_roles_url)
+    if v1_resp.status_code == 200:
+      for r in v1_resp.json().get("roles", []):
+        rank_val = r.get("rank", 999)
+        if rank_val < lowest_rank_val:
+          lowest_rank_val = rank_val
+          lowest_role_id = str(r.get("id"))
+
+  if not lowest_role_id:
     await interaction.followup.send(
-        f"Failed to kick member from Roblox group: `{kick_resp.text}`",
+        "❌ Could not determine the lowest guest role for this group.",
+        ephemeral=True,
+    )
+    return
+
+  member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
+  patch_headers = {
+      "x-api-key": ROBLOX_API_KEY,
+      "Content-Type": "application/json",
+  }
+  update_resp = requests.patch(
+      member_url,
+      headers=patch_headers,
+      json={"role": f"groups/{group_id}/roles/{lowest_role_id}"},
+  )
+
+  if update_resp.status_code != 200:
+    await interaction.followup.send(
+        f"Failed to reset member rank on Roblox: `{update_resp.text}`",
         ephemeral=True,
     )
     return
 
   await interaction.followup.send(
-      f"✅ Successfully kicked **{username}** from **{command.name}**!",
+      f"✅ Successfully kicked/reset **{username}** back to guest rank in"
+      f" **{command.name}**!",
       ephemeral=False,
   )
 
