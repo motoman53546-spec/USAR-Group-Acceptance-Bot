@@ -19,7 +19,6 @@ COMMAND_IDS = {
     "FORSCOM": "55555555",
 }
 
-# Storage for server configurations (Guild ID -> Config Dict)
 SERVER_CONFIGS = {}
 
 
@@ -97,7 +96,6 @@ class HighCommandReviewView(discord.ui.View):
 
     headers = {"x-api-key": ROBLOX_API_KEY}
 
-    # Fetch group roles to find the exact numerical ID matching the rank name
     roles_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
     roles_resp = requests.get(roles_url, headers=headers)
     target_role_id = None
@@ -109,7 +107,6 @@ class HighCommandReviewView(discord.ui.View):
           target_role_id = path_parts[-1] if path_parts else None
           break
 
-    # Fallback to public v1 roles endpoint if v2 didn't return roles directly
     if not target_role_id:
       v1_roles_url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
       v1_resp = requests.get(v1_roles_url)
@@ -313,7 +310,6 @@ async def rank_autocomplete(
   group_id = COMMAND_IDS[command_val]
   headers = {"x-api-key": ROBLOX_API_KEY} if ROBLOX_API_KEY else {}
 
-  # Try Cloud API v2 first for autocomplete roles
   try:
     url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
     resp = requests.get(url, headers=headers, timeout=5)
@@ -329,7 +325,6 @@ async def rank_autocomplete(
   except Exception:
     pass
 
-  # Fallback to public v1 groups API if v2 fails or key lacks permission
   try:
     v1_url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
     resp = requests.get(v1_url, timeout=5)
@@ -350,7 +345,7 @@ async def rank_autocomplete(
 # Admin Setup Commands
 @bot.tree.command(
     name="setup-requester-role",
-    description="Set the role allowed to submit group requests (Admin only).",
+    description="Set the role allowed to submit group requests.",
 )
 @app_commands.default_permissions(administrator=True)
 async def setup_requester_role(
@@ -367,7 +362,7 @@ async def setup_requester_role(
 
 @bot.tree.command(
     name="setup-accepter-role",
-    description="Set the role allowed to approve/deny requests (Admin only).",
+    description="Set the role allowed to approve/deny requests.",
 )
 @app_commands.default_permissions(administrator=True)
 async def setup_accepter_role(
@@ -384,10 +379,7 @@ async def setup_accepter_role(
 
 @bot.tree.command(
     name="setup-request-channel",
-    description=(
-        "Set the group request channel where High Command reviews/accepts"
-        " requests (Admin only)."
-    ),
+    description="Set the group request review channel.",
 )
 @app_commands.default_permissions(administrator=True)
 async def setup_request_channel(
@@ -404,10 +396,7 @@ async def setup_request_channel(
 
 @bot.tree.command(
     name="setup-grouprequest-channel",
-    description=(
-        "Set the channel where training staff must use /grouprequest (Admin"
-        " only)."
-    ),
+    description="Set the channel for /grouprequest submissions.",
 )
 @app_commands.default_permissions(administrator=True)
 async def setup_grouprequest_channel(
@@ -425,10 +414,7 @@ async def setup_grouprequest_channel(
 
 @bot.tree.command(
     name="setup-grouprequestlogs-channel",
-    description=(
-        "Set the group request logs channel where staff can view history of"
-        " who requested at what time (Admin only)."
-    ),
+    description="Set group request logs channel.",
 )
 @app_commands.default_permissions(administrator=True)
 async def setup_grouprequestlogs_channel(
@@ -445,10 +431,7 @@ async def setup_grouprequestlogs_channel(
 
 @bot.tree.command(
     name="setup-acceptor-log-channel",
-    description=(
-        "Set the group acceptance audit logs channel for approvals/denials"
-        " (Admin only)."
-    ),
+    description="Set the group acceptance audit logs channel.",
 )
 @app_commands.default_permissions(administrator=True)
 async def setup_acceptor_log_channel(
@@ -587,7 +570,6 @@ async def grouprequest(
 
   await interaction.response.defer(ephemeral=True)
 
-  # 1. Embed sent to the High Command review channel with buttons
   review_embed = discord.Embed(
       title="Tryout Proof / Group Acceptance Review",
       description="A new tryout result has been submitted for High Command review.",
@@ -625,7 +607,6 @@ async def grouprequest(
   )
   await dest_channel.send(embed=review_embed, view=view)
 
-  # 2. Permanent record sent to the Group Request Logs channel for staff tracking
   grouprequestlogs_id = config.get("grouprequestlogs_channel")
   if grouprequestlogs_id:
     logs_channel = interaction.guild.get_channel(grouprequestlogs_id)
@@ -662,8 +643,8 @@ async def grouprequest(
 async def on_ready():
   await bot.tree.sync()
   print(
-      f"Logged in as {bot.user} - Dual Cloud/Public API Role Pull & Request Logs"
-      " Online!"
+      f"Logged in as {bot.user} - Fixed setup-grouprequestlogs-channel string"
+      " length!"
   )
 
 
