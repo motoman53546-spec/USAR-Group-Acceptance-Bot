@@ -316,4 +316,4 @@ async def grouprequest(
 
 
 # Replace with your bot token
-bot.run("YOUR_BOT_TOKEN_HERE")
+bot.run(os.getenv("DISCORD_BOT_TOKEN"))
