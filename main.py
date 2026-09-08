@@ -10,9 +10,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 ROBLOX_API_KEY = os.getenv("ROBLOX_API_KEY")
 
 # Dictionary mapping friendly names to your Roblox Group IDs
-# Replace these placeholder numbers with your actual group IDs
 GROUP_IDS = {
-   "MPC": "33846212",
+    "MPC": "33846212",
     "ASOC": "16997678",
     "AAC": "33333333",
     "TRADOC": "44444444",
@@ -40,6 +39,9 @@ class GroupQueueView(discord.ui.View):
       )
       return
 
+    # Defer immediately to prevent interaction token timeouts
+    await interaction.response.defer()
+
     # Roblox Open Cloud v2 Accept Endpoint
     url = f"https://apis.roblox.com/cloud/v2/{self.join_request_path}:accept"
     headers = {
@@ -51,16 +53,20 @@ class GroupQueueView(discord.ui.View):
 
     for child in self.children:
       child.disabled = True
-    await interaction.message.edit(view=self)
+
+    try:
+      await interaction.edit_original_response(view=self)
+    except Exception:
+      pass
 
     if response.status_code == 200:
-      await interaction.response.send_message(
+      await interaction.followup.send(
           f"Successfully accepted **{self.username}** into **{self.group_name}**"
           f" via {interaction.user.mention}!",
           ephemeral=False,
       )
     else:
-      await interaction.response.send_message(
+      await interaction.followup.send(
           f"Failed to accept user. Error: `{response.text}`", ephemeral=True
       )
 
@@ -76,6 +82,8 @@ class GroupQueueView(discord.ui.View):
       )
       return
 
+    await interaction.response.defer()
+
     url = f"https://apis.roblox.com/cloud/v2/{self.join_request_path}:decline"
     headers = {
         "x-api-key": ROBLOX_API_KEY,
@@ -86,9 +94,13 @@ class GroupQueueView(discord.ui.View):
 
     for child in self.children:
       child.disabled = True
-    await interaction.message.edit(view=self)
 
-    await interaction.response.send_message(
+    try:
+      await interaction.edit_original_response(view=self)
+    except Exception:
+      pass
+
+    await interaction.followup.send(
         f"Declined join request for **{self.username}** in"
         f" **{self.group_name}**.",
         ephemeral=False,
