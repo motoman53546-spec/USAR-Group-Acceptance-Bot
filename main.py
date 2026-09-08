@@ -1,110 +1,170 @@
 import os
 import discord
 from discord.ext import commands
+import requests
 
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+ROBLOX_API_KEY = os.getenv("ROBLOX_API_KEY")
 
-class ApplicationReviewView(discord.ui.View):
+# Dictionary mapping friendly names to your Roblox Group IDs
+# Replace these placeholder numbers with your actual group IDs
+GROUP_IDS = {
+   "MPC": "33846212",
+    "ASOC": "16997678",
+    "AAC": "33333333",
+    "TRADOC": "44444444",
+    "FORSCOM": "55555555",
+}
 
-  def __init__(self, applicant: discord.Member):
-    super().__init__(timeout=None)
-    self.applicant = applicant
 
-  @discord.ui.button(
-      label="Accept", style=discord.ButtonStyle.green, custom_id="accept_app"
-  .encode("utf-8")
-  )
-  async def accept_button(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    # Check if user has command staff permissions
-    if not interaction.user.guild_permissions.manage_roles:
-      await interaction.response.send_message(
-          "You do not have permission to accept applications.", ephemeral=True
-      )
-      return
+class GroupQueueView(discord.ui.View):
 
-    # Disable buttons after action
-    for child in self.children:
-      child.disabled = True
-    await interaction.message.edit(view=self)
-
-    try:
-      # Optional: Add roles or notify user via DM here
-      await self.applicant.send(
-          "Your application has been **accepted**! Welcome to the group."
-      )
-    except discord.Forbidden:
-      pass
-
-    await interaction.response.send_message(
-        f"Application accepted by {interaction.user.mention} for"
-        f" {self.applicant.mention}.",
-        ephemeral=False,
-    )
+  def __init__(self, username: str, join_request_path: str, group_name: str):
+    super().__init__(timeout=180)
+    self.username = username
+    self.join_request_path = join_request_path
+    self.group_name = group_name
 
   @discord.ui.button(
-      label="Deny", style=discord.ButtonStyle.red, custom_id="deny_app"
+      label="Accept", style=discord.ButtonStyle.green, custom_id="accept_multi"
   )
-  async def deny_button(
+  async def accept_user(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
     if not interaction.user.guild_permissions.manage_roles:
       await interaction.response.send_message(
-          "You do not have permission to deny applications.", ephemeral=True
+          "You do not have permission to manage acceptances.", ephemeral=True
       )
       return
+
+    # Roblox Open Cloud v2 Accept Endpoint
+    url = f"https://apis.roblox.com/cloud/v2/{self.join_request_path}:accept"
+    headers = {
+        "x-api-key": ROBLOX_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, headers=headers)
 
     for child in self.children:
       child.disabled = True
     await interaction.message.edit(view=self)
 
-    try:
-      await self.applicant.send(
-          "Your application has been reviewed, but unfortunately it was"
-          " **denied** at this time."
+    if response.status_code == 200:
+      await interaction.response.send_message(
+          f"Successfully accepted **{self.username}** into **{self.group_name}**"
+          f" via {interaction.user.mention}!",
+          ephemeral=False,
       )
-    except discord.Forbidden:
-      pass
+    else:
+      await interaction.response.send_message(
+          f"Failed to accept user. Error: `{response.text}`", ephemeral=True
+      )
+
+  @discord.ui.button(
+      label="Deny", style=discord.ButtonStyle.red, custom_id="deny_multi"
+  )
+  async def deny_user(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    if not interaction.user.guild_permissions.manage_roles:
+      await interaction.response.send_message(
+          "You do not have permission to manage acceptances.", ephemeral=True
+      )
+      return
+
+    url = f"https://apis.roblox.com/cloud/v2/{self.join_request_path}:decline"
+    headers = {
+        "x-api-key": ROBLOX_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, headers=headers)
+
+    for child in self.children:
+      child.disabled = True
+    await interaction.message.edit(view=self)
 
     await interaction.response.send_message(
-        f"Application denied by {interaction.user.mention} for"
-        f" {self.applicant.mention}.",
+        f"Declined join request for **{self.username}** in"
+        f" **{self.group_name}**.",
         ephemeral=False,
     )
 
 
 @bot.tree.command(
-    name="apply", description="Submit your application for review."
+    name="requests",
+    description="View pending join requests for a specific military group.",
 )
-async def apply(interaction: discord.Interaction):
-  await interaction.response.send_message(
-      "Your application has been submitted to command staff for review!",
-      ephemeral=True,
+@discord.app_commands.choices(
+    branch=[
+        discord.app_commands.Choice(name="ASOC", value="ASOC"),
+        discord.app_commands.Choice(name="MPC", value="MPC"),
+        discord.app_commands.Choice(name="AAC", value="AAC"),
+        discord.app_commands.Choice(name="TRADOC", value="TRADOC"),
+        discord.app_commands.Choice(name="FORSCOM", value="FORSCOM"),
+    ]
+)
+async def requests_cmd(
+    interaction: discord.Interaction, branch: discord.app_commands.Choice[str]
+):
+  if not interaction.user.guild_permissions.manage_roles:
+    await interaction.response.send_message(
+        "You do not have permission to view group requests.", ephemeral=True
+    )
+    return
+
+  await interaction.response.defer(ephemeral=True)
+
+  group_id = GROUP_IDS.get(branch.value)
+  url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/join-requests"
+  headers = {"x-api-key": ROBLOX_API_KEY}
+
+  response = requests.get(url, headers=headers)
+
+  if response.status_code != 200:
+    await interaction.followup.send(
+        f"Failed to fetch requests for {branch.name}. Status Code:"
+        f" `{response.status_code}`",
+        ephemeral=True,
+    )
+    return
+
+  data = response.json().get("groupJoinRequests", [])
+
+  if not data:
+    await interaction.followup.send(
+        f"There are no pending join requests for **{branch.name}**.",
+        ephemeral=True,
+    )
+    return
+
+  # Grab the first request in the queue
+  first_req = data[0]
+  user_path = first_req.get("user")
+  req_path = first_req.get("path")
+
+  embed = discord.Embed(
+      title=f"Pending Join Request — {branch.name}",
+      description=(
+          f"**User ID Path:** `{user_path}`\n**Request Path:** `{req_path}`"
+      ),
+      color=discord.Color.dark_blue(),
   )
 
-  # Find a designated staff channel or send to a specific channel ID
-  # Replace with your actual staff review channel ID
-  staff_channel_id = os.getenv("STAFF_CHANNEL_ID")
-  if staff_channel_id:
-    channel = bot.get_channel(int(staff_channel_id))
-    if channel:
-      embed = discord.Embed(
-          title="New Sub-Division Application",
-          description=f"Applicant: {interaction.user.mention} ({interaction.user.id})",
-          color=discord.Color.blue(),
-      )
-      view = ApplicationReviewView(interaction.user)
-      await channel.send(embed=embed, view=view)
+  view = GroupQueueView(
+      username=user_path, join_request_path=req_path, group_name=branch.name
+  )
+  await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Ready to process applications!")
+  print(f"Logged in as {bot.user} - Multi-group bot online!")
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
