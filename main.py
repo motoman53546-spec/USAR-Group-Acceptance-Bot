@@ -1,16 +1,16 @@
 import os
-import aiohttp
+from datetime import datetime, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands
+import requests
 
 intents = discord.Intents.default()
-intents.message_content = True
-intents.guilds = True
-
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Configuration mapping commands to Roblox Group IDs
+ROBLOX_API_KEY = os.getenv("ROBLOX_API_KEY")
+
 COMMAND_IDS = {
     "Military Police Corps": "33846212",
     "ASOC": "16997678",
@@ -19,25 +19,197 @@ COMMAND_IDS = {
     "FORSCOM": "55555555",
 }
 
-# Channel and Role configuration storage (in-memory, use a database in production)
-config_store = {
-    "requester_role": None,
-    "accepter_role": None,
-    "request_channel": None,  # group-acceptance-requests
-    "grouprequest_channel": None,  # group-request
-    "grouprequestlogs_channel": None,  # group-request-logs
-    "acceptor_log_channel": None,  # group-acceptance-logs
-}
+SERVER_CONFIGS = {}
 
 
-async def fetch_roblox_roles(group_id: str) -> list[dict]:
-  url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
-  async with aiohttp.ClientSession() as session:
-    async with session.get(url) as resp:
-      if resp.status == 200:
-        data = await resp.json()
-        return data.get("roles", [])
-      return []
+class HighCommandReviewView(discord.ui.View):
+
+  def __init__(
+      self,
+      username: str,
+      command_name: str,
+      division: str,
+      rank: str,
+      company: str,
+      notes: str,
+      proof_url: str,
+      instructor: discord.User,
+  ):
+    super().__init__(timeout=None)
+    self.username = username
+    self.command_name = command_name
+    self.division = division
+    self.rank = rank
+    self.company = company
+    self.notes = notes
+    self.proof_url = proof_url
+    self.instructor = instructor
+
+  @discord.ui.button(
+      label="Approve & Send Request",
+      style=discord.ButtonStyle.green,
+      custom_id="hc_accept",
+  )
+  async def approve_request(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    config = SERVER_CONFIGS.get(interaction.guild_id, {})
+    accepter_role_id = config.get("accepter_role")
+
+    has_permission = interaction.user.guild_permissions.administrator
+    if accepter_role_id and not has_permission:
+      role = interaction.guild.get_role(accepter_role_id)
+      if role and role in interaction.user.roles:
+        has_permission = True
+
+    if not has_permission:
+      await interaction.response.send_message(
+          "You do not have the required Group Accepter role or Administrator"
+          " permissions to approve requests.",
+          ephemeral=True,
+      )
+      return
+
+    await interaction.response.defer()
+
+    user_search_url = (
+        f"https://users.roblox.com/v1/users/search?keyword={self.username}"
+    )
+    user_resp = requests.get(user_search_url)
+
+    if user_resp.status_code != 200 or not user_resp.json().get("data"):
+      await interaction.followup.send(
+          f"Failed to find Roblox user `{self.username}` via search API.",
+          ephemeral=True,
+      )
+      return
+
+    user_data = user_resp.json()["data"][0]
+    roblox_user_id = user_data["id"]
+
+    group_id = COMMAND_IDS.get(self.command_name)
+    if not group_id:
+      await interaction.followup.send(
+          f"Invalid command mapping for `{self.command_name}`.", ephemeral=True
+      )
+      return
+
+    headers = {"x-api-key": ROBLOX_API_KEY}
+    member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
+
+    roles_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
+    roles_resp = requests.get(roles_url, headers=headers)
+    target_role_id = None
+
+    if roles_resp.status_code == 200:
+      for r in roles_resp.json().get("groupRoles", []):
+        if r.get("displayName", "").lower() == self.rank.lower():
+          path_parts = r.get("path", "").split("/")
+          target_role_id = path_parts[-1] if path_parts else None
+          break
+
+    if not target_role_id:
+      v1_roles_url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
+      v1_resp = requests.get(v1_roles_url)
+      if v1_resp.status_code == 200:
+        for r in v1_resp.json().get("roles", []):
+          if r.get("name", "").lower() == self.rank.lower():
+            target_role_id = str(r.get("id"))
+            break
+
+    member_resp = requests.get(member_url, headers=headers)
+    if member_resp.status_code == 200 and target_role_id:
+      patch_headers = {
+          "x-api-key": ROBLOX_API_KEY,
+          "Content-Type": "application/json",
+      }
+      update_resp = requests.patch(
+          member_url,
+          headers=patch_headers,
+          json={"role": f"groups/{group_id}/roles/{target_role_id}"},
+      )
+      if update_resp.status_code != 200:
+        await interaction.followup.send(
+            f"Failed to update member rank on Roblox: `{update_resp.text}`",
+            ephemeral=True,
+        )
+        return
+
+    for child in self.children:
+      child.disabled = True
+
+    try:
+      await interaction.edit_original_response(view=self)
+    except Exception:
+      pass
+
+    success_text = (
+        f"Successfully approved **{self.username}** into"
+        f" **{self.command_name}** ({self.rank} - {self.division} /"
+        f" {self.company}) by {interaction.user.mention}!"
+    )
+    await interaction.followup.send(success_text, ephemeral=False)
+
+    acceptor_log_id = config.get("acceptor_log_channel")
+    if acceptor_log_id:
+      log_channel = interaction.guild.get_channel(acceptor_log_id)
+      if log_channel:
+        log_embed = discord.Embed(
+            title="📋 Group Acceptance Audit Log (Approved)",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        log_embed.add_field(
+            name="Accepter", value=interaction.user.mention, inline=True
+        )
+        log_embed.add_field(
+            name="Target User", value=self.username, inline=True
+        )
+        log_embed.add_field(name="Command", value=self.command_name, inline=True)
+        log_embed.add_field(name="Assigned Rank", value=self.rank, inline=True)
+        log_embed.add_field(
+            name="Division / Company",
+            value=f"{self.division} / {self.company}",
+            inline=True,
+        )
+        await log_channel.send(embed=log_embed)
+
+  @discord.ui.button(
+      label="Deny Request", style=discord.ButtonStyle.red, custom_id="hc_deny"
+  )
+  async def deny_request(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    config = SERVER_CONFIGS.get(interaction.guild_id, {})
+    accepter_role_id = config.get("accepter_role")
+
+    has_permission = interaction.user.guild_permissions.administrator
+    if accepter_role_id and not has_permission:
+      role = interaction.guild.get_role(accepter_role_id)
+      if role and role in interaction.user.roles:
+        has_permission = True
+
+    if not has_permission:
+      await interaction.response.send_message(
+          "You do not have permission to manage requests.", ephemeral=True
+      )
+      return
+
+    await interaction.response.defer()
+
+    for child in self.children:
+      child.disabled = True
+
+    try:
+      await interaction.edit_original_response(view=self)
+    except Exception:
+      pass
+
+    await interaction.followup.send(
+        f"Tryout log request for **{self.username}** was denied by"
+        f" {interaction.user.mention}.",
+        ephemeral=False,
+    )
 
 
 async def rank_autocomplete(
@@ -48,28 +220,23 @@ async def rank_autocomplete(
     return []
 
   group_id = COMMAND_IDS[command_val]
-  roles = await fetch_roblox_roles(group_id)
+  headers = {"x-api-key": ROBLOX_API_KEY} if ROBLOX_API_KEY else {}
 
-  choices = []
-  for role in roles:
-    role_name = role.get("name")
-    if current.lower() in role_name.lower():
-      choices.append(app_commands.Choice(name=role_name, value=role_name))
-      if len(choices) >= 25:
-        break
-  return choices
-
-
-@bot.event
-async def on_ready():
   try:
-    synced = await bot.tree.sync()
-    print(f"Synced {len(synced)} command(s). Logged in as {bot.user}.")
-  except Exception as e:
-    print(f"Failed to sync commands: {e}")
-
-
-# Setup Commands for Roles & Channels
+    url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
+    resp = requests.get(url, headers=headers, timeout=5)
+    if resp.status_code == 200:
+      roles = resp.json().get("groupRoles", [])
+      choices = []
+      for role in roles:
+        name = role.get("displayName") or role.get("name")
+        if name and current.lower() in name.lower():
+          choices.append(app_commands.Choice(name=name, value=name))
+      if choices:
+        return choices[:25]
+  except Exception:
+    pass
+  return []
 
 
 @bot.tree.command(
@@ -79,7 +246,9 @@ async def on_ready():
 async def setup_requester_role(
     interaction: discord.Interaction, role: discord.Role
 ):
-  config_store["requester_role"] = role.id
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["requester_role"] = role.id
   await interaction.response.send_message(
       f"Requester role set to {role.mention}", ephemeral=True
   )
@@ -92,7 +261,9 @@ async def setup_requester_role(
 async def setup_accepter_role(
     interaction: discord.Interaction, role: discord.Role
 ):
-  config_store["accepter_role"] = role.id
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["accepter_role"] = role.id
   await interaction.response.send_message(
       f"Accepter role set to {role.mention}", ephemeral=True
   )
@@ -106,7 +277,9 @@ async def setup_accepter_role(
 async def setup_request_channel(
     interaction: discord.Interaction, channel: discord.TextChannel
 ):
-  config_store["request_channel"] = channel.id
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["request_channel"] = channel.id
   await interaction.response.send_message(
       f"Review channel set to {channel.mention}", ephemeral=True
   )
@@ -120,7 +293,9 @@ async def setup_request_channel(
 async def setup_grouprequest_channel(
     interaction: discord.Interaction, channel: discord.TextChannel
 ):
-  config_store["grouprequest_channel"] = channel.id
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["grouprequest_channel"] = channel.id
   await interaction.response.send_message(
       f"Group request channel set to {channel.mention}", ephemeral=True
   )
@@ -134,7 +309,9 @@ async def setup_grouprequest_channel(
 async def setup_grouprequestlogs_channel(
     interaction: discord.Interaction, channel: discord.TextChannel
 ):
-  config_store["grouprequestlogs_channel"] = channel.id
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["grouprequestlogs_channel"] = channel.id
   await interaction.response.send_message(
       f"Request logs channel set to {channel.mention}", ephemeral=True
   )
@@ -148,139 +325,18 @@ async def setup_grouprequestlogs_channel(
 async def setup_acceptor_log_channel(
     interaction: discord.Interaction, channel: discord.TextChannel
 ):
-  config_store["acceptor_log_channel"] = channel.id
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["acceptor_log_channel"] = channel.id
   await interaction.response.send_message(
       f"Acceptance log channel set to {channel.mention}", ephemeral=True
   )
 
 
-# Group Request Command
-
-
-class GroupReviewModal(discord.ui.Modal, title="Group Rank Request"):
-  roblox_username = discord.ui.TextInput(
-      label="Roblox Username", placeholder="Enter username...", required=True
-  )
-  reason = discord.ui.TextInput(
-      label="Reason / Notes",
-      style=discord.TextStyle.paragraph,
-      placeholder="Why is this rank requested?",
-      required=True,
-  )
-
-  def __init__(self, command: str, rank: str):
-    super().__init__()
-    self.command = command
-    self.rank = rank
-
-  async def on_submit(self, interaction: discord.Interaction):
-    req_channel_id = config_store.get("request_channel")
-    log_channel_id = config_store.get("grouprequestlogs_channel")
-
-    embed = discord.Embed(
-        title="New Group Rank Request",
-        color=discord.Color.blue(),
-        timestamp=discord.utils.utcnow(),
-    )
-    embed.add_field(name="Instructor", value=interaction.user.mention, inline=True)
-    embed.add_field(name="Command", value=self.command, inline=True)
-    embed.add_field(name="Target Rank", value=self.rank, inline=True)
-    embed.add_field(
-        name="Roblox User", value=self.roblox_username.value, inline=False
-    )
-    embed.add_field(name="Reason", value=self.reason.value, inline=False)
-
-    # Send to review channel
-    if req_channel_id:
-      req_channel = interaction.guild.get_channel(req_channel_id)
-      if req_channel:
-        view = ReviewActionView(interaction.user.id, self.roblox_username.value, self.rank)
-        await req_channel.send(embed=embed, view=view)
-
-    # Log the submission in group-request-logs
-    if log_channel_id:
-      log_channel = interaction.guild.get_channel(log_channel_id)
-      if log_channel:
-        log_embed = discord.Embed(
-            title="Instructor Request Log",
-            description=(
-                f"**Instructor:** {interaction.user.mention} (`{interaction.user.id}`)\n"
-                f"**Command:** {self.command}\n"
-                f"**Target Rank:** {self.rank}\n"
-                f"**Roblox User:** `{self.roblox_username.value}`"
-            ),
-            color=discord.Color.dark_green(),
-            timestamp=discord.utils.utcnow(),
-        )
-        await log_channel.send(embed=log_embed)
-
-    await interaction.response.send_message(
-        "Your group request has been submitted successfully!", ephemeral=True
-    )
-
-
-class ReviewActionView(discord.ui.View):
-
-  def __init__(self, requester_id: int, target_user: str, target_rank: str):
-    super().__init__(timeout=None)
-    self.requester_id = requester_id
-    self.target_user = target_user
-    self.target_rank = target_rank
-
-  @discord.ui.button(
-      label="Accept", style=discord.ButtonStyle.green, custom_id="group_accept"
-  )
-  async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-    accepter_role_id = config_store.get("accepter_role")
-    if accepter_role_id and not any(r.id == accepter_role_id for r in interaction.user.roles):
-      await interaction.response.send_message(
-          "You do not have permission to accept requests.", ephemeral=True
-      )
-      return
-
-    accept_log_id = config_store.get("acceptor_log_channel")
-    if accept_log_id:
-      log_chan = interaction.guild.get_channel(accept_log_id)
-      if log_chan:
-        await log_chan.send(
-            f"✅ Request for `{self.target_user}` (`{self.target_rank}`) accepted by {interaction.user.mention}."
-        )
-
-    for child in self.children:
-      child.disabled = True
-    await interaction.response.edit_message(view=self)
-    await interaction.followup.send(
-        f"Request accepted by {interaction.user.mention}.", ephemeral=True
-    )
-
-  @discord.ui.button(
-      label="Deny", style=discord.ButtonStyle.danger, custom_id="group_deny"
-  )
-  async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-    accepter_role_id = config_store.get("accepter_role")
-    if accepter_role_id and not any(r.id == accepter_role_id for r in interaction.user.roles):
-      await interaction.response.send_message(
-          "You do not have permission to deny requests.", ephemeral=True
-      )
-      return
-
-    accept_log_id = config_store.get("acceptor_log_channel")
-    if accept_log_id:
-      log_chan = interaction.guild.get_channel(accept_log_id)
-      if log_chan:
-        await log_chan.send(
-            f"❌ Request for `{self.target_user}` (`{self.target_rank}`) denied by {interaction.user.mention}."
-        )
-
-    for child in self.children:
-      child.disabled = True
-    await interaction.response.edit_message(view=self)
-    await interaction.followup.send(
-        f"Request denied by {interaction.user.mention}.", ephemeral=True
-    )
-
-
-@bot.tree.command(name="grouprequest", description="Submit a group rank request")
+@bot.tree.command(
+    name="grouprequest",
+    description="Submit a tryout completion log for review.",
+)
 @app_commands.choices(
     command=[
         app_commands.Choice(
@@ -294,26 +350,119 @@ class ReviewActionView(discord.ui.View):
 )
 @app_commands.autocomplete(rank=rank_autocomplete)
 async def grouprequest(
-    interaction: discord.Interaction, command: str, rank: str
+    interaction: discord.Interaction,
+    username: str,
+    command: app_commands.Choice[str],
+    division: str,
+    rank: str,
+    company: str,
+    notes: str,
+    proof: discord.Attachment,
 ):
-  req_role_id = config_store.get("requester_role")
-  if req_role_id and not any(r.id == req_role_id for r in interaction.user.roles):
+  config = SERVER_CONFIGS.get(interaction.guild_id, {})
+  grouprequest_channel_id = config.get("grouprequest_channel")
+
+  if grouprequest_channel_id and interaction.channel_id != grouprequest_channel_id:
+    target_channel = interaction.guild.get_channel(grouprequest_channel_id)
+    channel_mention = (
+        target_channel.mention if target_channel else "the designated channel"
+    )
     await interaction.response.send_message(
-        "You do not have the required requester role to use this command.",
+        f"❌ You can only use the `/grouprequest` command inside"
+        f" {channel_mention}!",
         ephemeral=True,
     )
     return
 
-  group_channel_id = config_store.get("grouprequest_channel")
-  if group_channel_id and interaction.channel.id != group_channel_id:
-    channel_mention = interaction.guild.get_channel(group_channel_id).mention
+  requester_role_id = config.get("requester_role")
+  can_submit = interaction.user.guild_permissions.administrator
+  if requester_role_id and not can_submit:
+    role = interaction.guild.get_role(requester_role_id)
+    if role and role in interaction.user.roles:
+      can_submit = True
+
+  if not can_submit:
     await interaction.response.send_message(
-        f"Please use this command in {channel_mention}.", ephemeral=True
+        "You do not have the required Group Requester role to submit tryout"
+        " logs.",
+        ephemeral=True,
     )
     return
 
-  await interaction.response.send_modal(GroupReviewModal(command, rank))
+  await interaction.response.defer(ephemeral=True)
+
+  review_embed = discord.Embed(
+      title="Tryout Proof / Group Acceptance Review",
+      description="A new tryout result has been submitted for High Command review.",
+      color=discord.Color.dark_red(),
+      timestamp=datetime.now(timezone.utc),
+  )
+  review_embed.add_field(name="Attendee Username", value=username, inline=True)
+  review_embed.add_field(name="Command", value=command.name, inline=True)
+  review_embed.add_field(name="Division", value=division, inline=True)
+  review_embed.add_field(name="Target Rank", value=rank, inline=True)
+  review_embed.add_field(name="Company", value=company, inline=True)
+  review_embed.add_field(name="Notes / Result", value=notes, inline=False)
+  review_embed.add_field(
+      name="Requested By", value=interaction.user.mention, inline=True
+  )
+  review_embed.set_image(url=proof.url)
+  review_embed.set_footer(text="Waiting for High Command Approval...")
+
+  view = HighCommandReviewView(
+      username=username,
+      command_name=command.name,
+      division=division,
+      rank=rank,
+      company=company,
+      notes=notes,
+      proof_url=proof.url,
+      instructor=interaction.user,
+  )
+
+  request_channel_id = config.get("request_channel")
+  dest_channel = (
+      interaction.guild.get_channel(request_channel_id)
+      if request_channel_id
+      else interaction.channel
+  )
+  await dest_channel.send(embed=review_embed, view=view)
+
+  grouprequestlogs_id = config.get("grouprequestlogs_channel")
+  if grouprequestlogs_id:
+    logs_channel = interaction.guild.get_channel(grouprequestlogs_id)
+    if logs_channel:
+      logs_embed = discord.Embed(
+          title="📋 Group Request History Log",
+          color=discord.Color.gold(),
+          timestamp=datetime.now(timezone.utc),
+      )
+      logs_embed.add_field(
+          name="Instructor / Staff", value=interaction.user.mention, inline=True
+      )
+      logs_embed.add_field(name="Attendee", value=username, inline=True)
+      logs_embed.add_field(name="Command", value=command.name, inline=True)
+      logs_embed.add_field(name="Division", value=division, inline=True)
+      logs_embed.add_field(name="Target Rank", value=rank, inline=True)
+      logs_embed.add_field(name="Company", value=company, inline=True)
+      logs_embed.add_field(
+          name="Submitted At",
+          value=f"<t:{int(datetime.now(timezone.utc).timestamp())}:F>",
+          inline=False,
+      )
+      await logs_channel.send(embed=logs_embed)
+
+  await interaction.followup.send(
+      f"Your tryout request log has been successfully published to"
+      f" {dest_channel.mention} for review!",
+      ephemeral=True,
+  )
 
 
-# Replace with your bot token
+@bot.event
+async def on_ready():
+  await bot.tree.sync()
+  print(f"Logged in as {bot.user} - Fully restored command parameters!")
+
+
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
