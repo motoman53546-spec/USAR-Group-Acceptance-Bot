@@ -282,7 +282,7 @@ async def setup_accepter_role(
 @bot.tree.command(
     name="setup-request-channel",
     description=(
-        "Set the channel where /grouprequest must be run (Admin only)."
+        "Set the channel where /grouprequest output/logs go (Admin only)."
     ),
 )
 @app_commands.default_permissions(administrator=True)
@@ -293,7 +293,29 @@ async def setup_request_channel(
     SERVER_CONFIGS[interaction.guild_id] = {}
   SERVER_CONFIGS[interaction.guild_id]["request_channel"] = channel.id
   await interaction.response.send_message(
-      f"✅ Group request input channel successfully set to {channel.mention}.",
+      f"✅ Group request logs output channel successfully set to"
+      f" {channel.mention}.",
+      ephemeral=True,
+  )
+
+
+@bot.tree.command(
+    name="setup-grouprequest-channel",
+    description=(
+        "Set the channel where training staff must use /grouprequest (Admin"
+        " only)."
+    ),
+)
+@app_commands.default_permissions(administrator=True)
+async def setup_grouprequest_channel(
+    interaction: discord.Interaction, channel: discord.TextChannel
+):
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["grouprequest_channel"] = channel.id
+  await interaction.response.send_message(
+      f"✅ Actual group request submission channel successfully set to"
+      f" {channel.mention}.",
       ephemeral=True,
   )
 
@@ -344,11 +366,11 @@ async def grouprequest(
     proof: discord.Attachment,
 ):
   config = SERVER_CONFIGS.get(interaction.guild_id, {})
-  request_channel_id = config.get("request_channel")
+  grouprequest_channel_id = config.get("grouprequest_channel")
 
-  # Enforce that /grouprequest can only be called in the dedicated request channel
-  if request_channel_id and interaction.channel_id != request_channel_id:
-    target_channel = interaction.guild.get_channel(request_channel_id)
+  # Enforce that /grouprequest can only be called in the dedicated grouprequest submission channel
+  if grouprequest_channel_id and interaction.channel_id != grouprequest_channel_id:
+    target_channel = interaction.guild.get_channel(grouprequest_channel_id)
     channel_mention = (
         target_channel.mention if target_channel else "the designated channel"
     )
@@ -400,7 +422,8 @@ async def grouprequest(
       instructor=interaction.user,
   )
 
-  # Send the review request to the same channel or use request channel
+  # Send the review request to the designated request output channel or fallback to current channel
+  request_channel_id = config.get("request_channel")
   dest_channel = (
       interaction.guild.get_channel(request_channel_id)
       if request_channel_id
