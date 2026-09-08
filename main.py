@@ -592,6 +592,42 @@ async def changerank(
       "x-api-key": ROBLOX_API_KEY,
       "Content-Type": "application/json",
   }
+
+  # Check if member exists first; if not, check for join request and accept them
+  member_resp = requests.get(member_url, headers=headers)
+  if member_resp.status_code != 200:
+    requests_url = (
+        f"https://apis.roblox.com/cloud/v2/groups/{group_id}/join-requests"
+    )
+    get_reqs = requests.get(requests_url, headers=headers)
+
+    target_request_path = None
+    if get_reqs.status_code == 200:
+      for req in get_reqs.json().get("groupJoinRequests", []):
+        if req.get("user", "").endswith(str(roblox_user_id)):
+          target_request_path = req.get("path")
+          break
+
+    if not target_request_path:
+      await interaction.followup.send(
+          f"⚠️ **{username}** is not in the group and has not sent a manual join request in **{command.name}** yet!",
+          ephemeral=True,
+      )
+      return
+
+    accept_url = f"https://apis.roblox.com/cloud/v2/{target_request_path}:accept"
+    accept_headers = {
+        "x-api-key": ROBLOX_API_KEY,
+        "Content-Type": "application/json",
+    }
+    accept_resp = requests.post(accept_url, headers=accept_headers, json={})
+    if accept_resp.status_code != 200:
+      await interaction.followup.send(
+          f"Failed to auto-accept join request: `{accept_resp.text}`",
+          ephemeral=True,
+      )
+      return
+
   update_resp = requests.patch(
       member_url,
       headers=patch_headers,
