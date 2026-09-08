@@ -29,6 +29,7 @@ class HighCommandReviewView(discord.ui.View):
       self,
       username: str,
       group_name: str,
+      rank: str,
       division: str,
       company: str,
       notes: str,
@@ -38,6 +39,7 @@ class HighCommandReviewView(discord.ui.View):
     super().__init__(timeout=None)
     self.username = username
     self.group_name = group_name
+    self.rank = rank
     self.division = division
     self.company = company
     self.notes = notes
@@ -133,18 +135,18 @@ class HighCommandReviewView(discord.ui.View):
     if response.status_code == 200:
       success_text = (
           f"Successfully approved and admitted **{self.username}** into"
-          f" **{self.group_name}** ({self.division} / {self.company}) by"
-          f" {interaction.user.mention}!"
+          f" **{self.group_name}** ({self.rank} - {self.division} /"
+          f" {self.company}) by {interaction.user.mention}!"
       )
       await interaction.followup.send(success_text, ephemeral=False)
 
-      # Send a record into the designated Group Acceptor / Audit Log channel if configured
+      # Send a record into the designated Group Acceptance Audit Log channel
       acceptor_log_id = config.get("acceptor_log_channel")
       if acceptor_log_id:
         log_channel = interaction.guild.get_channel(acceptor_log_id)
         if log_channel:
           log_embed = discord.Embed(
-              title="📋 Group Accepter Audit Log",
+              title="📋 Group Acceptance Audit Log (Approved)",
               color=discord.Color.green(),
               timestamp=datetime.utcnow(),
           )
@@ -157,6 +159,7 @@ class HighCommandReviewView(discord.ui.View):
           log_embed.add_field(
               name="Branch / Group", value=self.group_name, inline=True
           )
+          log_embed.add_field(name="Target Rank", value=self.rank, inline=True)
           log_embed.add_field(
               name="Division / Company",
               value=f"{self.division} / {self.company}",
@@ -221,7 +224,7 @@ class HighCommandReviewView(discord.ui.View):
       log_channel = interaction.guild.get_channel(acceptor_log_id)
       if log_channel:
         log_embed = discord.Embed(
-            title="📋 Group Accepter Audit Log",
+            title="📋 Group Acceptance Audit Log (Denied)",
             color=discord.Color.red(),
             timestamp=datetime.utcnow(),
         )
@@ -234,14 +237,37 @@ class HighCommandReviewView(discord.ui.View):
         log_embed.add_field(
             name="Branch / Group", value=self.group_name, inline=True
         )
-        log_embed.add_field(
-            name="Action Status", value="Denied Request", inline=True
-        )
+        log_embed.add_field(name="Action Status", value="Denied", inline=True)
         log_embed.set_footer(
             text=f"Accepter ID: {interaction.user.id}",
             icon_url=interaction.user.display_avatar.url,
         )
         await log_channel.send(embed=log_embed)
+
+
+# Autocomplete for fetching real Roblox group ranks dynamically
+async def rank_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+  branch_val = getattr(interaction.namespace, "branch", None)
+  if not branch_val or branch_val not in GROUP_IDS:
+    return []
+
+  group_id = GROUP_IDS[branch_val]
+  try:
+    url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
+    resp = requests.get(url, timeout=5)
+    if resp.status_code == 200:
+      roles = resp.json().get("roles", [])
+      choices = [
+          app_commands.Choice(name=role["name"], value=role["name"])
+          for role in roles
+          if current.lower() in role["name"].lower()
+      ]
+      return choices[:25]
+  except Exception:
+    pass
+  return []
 
 
 # Admin Setup Commands
@@ -282,7 +308,8 @@ async def setup_accepter_role(
 @bot.tree.command(
     name="setup-request-channel",
     description=(
-        "Set the channel where /grouprequest output/logs go (Admin only)."
+        "Set the group request logs channel where review embeds are posted"
+        " (Admin only)."
     ),
 )
 @app_commands.default_permissions(administrator=True)
@@ -293,8 +320,7 @@ async def setup_request_channel(
     SERVER_CONFIGS[interaction.guild_id] = {}
   SERVER_CONFIGS[interaction.guild_id]["request_channel"] = channel.id
   await interaction.response.send_message(
-      f"✅ Group request logs output channel successfully set to"
-      f" {channel.mention}.",
+      f"✅ Group request logs channel successfully set to {channel.mention}.",
       ephemeral=True,
   )
 
@@ -314,7 +340,7 @@ async def setup_grouprequest_channel(
     SERVER_CONFIGS[interaction.guild_id] = {}
   SERVER_CONFIGS[interaction.guild_id]["grouprequest_channel"] = channel.id
   await interaction.response.send_message(
-      f"✅ Actual group request submission channel successfully set to"
+      f"✅ Training staff submission channel successfully set to"
       f" {channel.mention}.",
       ephemeral=True,
   )
@@ -323,8 +349,8 @@ async def setup_grouprequest_channel(
 @bot.tree.command(
     name="setup-acceptor-log-channel",
     description=(
-        "Set the audit log channel where acceptance records are posted (Admin"
-        " only)."
+        "Set the group acceptance audit logs channel for approvals/denials"
+        " (Admin only)."
     ),
 )
 @app_commands.default_permissions(administrator=True)
@@ -339,6 +365,73 @@ async def setup_acceptor_log_channel(
       f" {channel.mention}.",
       ephemeral=True,
   )
+
+
+# Standalone /rank command to check a user's role in a Roblox group
+@bot.tree.command(
+    name="rank", description="Check a user's current rank in a Roblox group."
+)
+@app_commands.choices(
+    branch=[
+        app_commands.Choice(
+            name="Military Police Corps", value="Military Police Corps"
+        ),
+        app_commands.Choice(name="ASOC", value="ASOC"),
+        app_commands.Choice(name="AAC", value="AAC"),
+        app_commands.Choice(name="TRADOC", value="TRADOC"),
+        app_commands.Choice(name="FORSCOM", value="FORSCOM"),
+    ]
+)
+async def rank(
+    interaction: discord.Interaction,
+    username: str,
+    branch: app_commands.Choice[str],
+):
+  await interaction.response.defer(ephemeral=True)
+
+  user_search_url = (
+      f"https://users.roblox.com/v1/users/search?keyword={username}"
+  )
+  user_resp = requests.get(user_search_url)
+
+  if user_resp.status_code != 200 or not user_resp.json().get("data"):
+    await interaction.followup.send(
+        f"Failed to find Roblox user `{username}` via search API.",
+        ephemeral=True,
+    )
+    return
+
+  user_data = user_resp.json()["data"][0]
+  roblox_user_id = user_data["id"]
+  real_username = user_data["name"]
+
+  group_id = GROUP_IDS.get(branch.name)
+
+  # Fetch user's roles in groups
+  groups_url = f"https://groups.roblox.com/v1/users/{roblox_user_id}/groups/roles"
+  groups_resp = requests.get(groups_url)
+
+  user_role_name = "Guest / Not in Group"
+  user_rank_number = 0
+
+  if groups_resp.status_code == 200:
+    for g in groups_resp.json().get("data", []):
+      if str(g.get("group", {}).get("id")) == str(group_id):
+        user_role_name = g.get("role", {}).get("name", "Unknown")
+        user_rank_number = g.get("role", {}).get("rank", 0)
+        break
+
+  embed = discord.Embed(
+      title=f"Roblox Rank Lookup: {real_username}",
+      color=discord.Color.blue(),
+      timestamp=datetime.utcnow(),
+  )
+  embed.add_field(name="Group Branch", value=branch.name, inline=True)
+  embed.add_field(name="Current Rank", value=user_role_name, inline=True)
+  embed.add_field(name="Rank Number", value=str(user_rank_number), inline=True)
+  embed.set_footer(text=f"Roblox User ID: {roblox_user_id}")
+
+  await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(
@@ -356,10 +449,12 @@ async def setup_acceptor_log_channel(
         app_commands.Choice(name="FORSCOM", value="FORSCOM"),
     ]
 )
+@app_commands.autocomplete(rank=rank_autocomplete)
 async def grouprequest(
     interaction: discord.Interaction,
     username: str,
     branch: app_commands.Choice[str],
+    rank: str,
     division: str,
     company: str,
     notes: str,
@@ -368,7 +463,7 @@ async def grouprequest(
   config = SERVER_CONFIGS.get(interaction.guild_id, {})
   grouprequest_channel_id = config.get("grouprequest_channel")
 
-  # Enforce that /grouprequest can only be called in the dedicated grouprequest submission channel
+  # Enforce channel restriction for submissions
   if grouprequest_channel_id and interaction.channel_id != grouprequest_channel_id:
     target_channel = interaction.guild.get_channel(grouprequest_channel_id)
     channel_mention = (
@@ -402,9 +497,11 @@ async def grouprequest(
       title="Tryout Proof / Group Acceptance Log",
       description="A new tryout result has been submitted for review.",
       color=discord.Color.dark_red(),
+      timestamp=datetime.utcnow(),
   )
   embed.add_field(name="Attendee Username", value=username, inline=True)
   embed.add_field(name="Group Branch", value=branch.name, inline=True)
+  embed.add_field(name="Target Rank", value=rank, inline=True)
   embed.add_field(name="Division", value=division, inline=True)
   embed.add_field(name="Company", value=company, inline=True)
   embed.add_field(name="Notes / Result", value=notes, inline=False)
@@ -415,6 +512,7 @@ async def grouprequest(
   view = HighCommandReviewView(
       username=username,
       group_name=branch.name,
+      rank=rank,
       division=division,
       company=company,
       notes=notes,
@@ -422,7 +520,7 @@ async def grouprequest(
       instructor=interaction.user,
   )
 
-  # Send the review request to the designated request output channel or fallback to current channel
+  # Send review embed to the configured Group Request Logs channel
   request_channel_id = config.get("request_channel")
   dest_channel = (
       interaction.guild.get_channel(request_channel_id)
@@ -441,7 +539,9 @@ async def grouprequest(
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Full Audit Logging & Channels Online!")
+  print(
+      f"Logged in as {bot.user} - Live Roblox Ranks & Full Audit System Online!"
+  )
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
