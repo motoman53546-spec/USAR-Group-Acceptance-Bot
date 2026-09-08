@@ -18,6 +18,9 @@ GROUP_IDS = {
     "FORSCOM": "55555555",
 }
 
+# Storage for server-specific configurations (Guild ID -> Config Dict)
+SERVER_CONFIGS = {}
+
 
 class HighCommandReviewView(discord.ui.View):
 
@@ -48,15 +51,26 @@ class HighCommandReviewView(discord.ui.View):
   async def approve_request(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
-    if not interaction.user.guild_permissions.manage_roles:
+    config = SERVER_CONFIGS.get(interaction.guild_id, {})
+    accepter_role_id = config.get("accepter_role")
+
+    # Check if user has the configured accepter role OR administrator permissions
+    has_permission = interaction.user.guild_permissions.administrator
+    if accepter_role_id and not has_permission:
+      role = interaction.guild.get_role(accepter_role_id)
+      if role and role in interaction.user.roles:
+        has_permission = True
+
+    if not has_permission:
       await interaction.response.send_message(
-          "Only High Command can approve tryout request logs.", ephemeral=True
+          "You do not have the required Group Accepter role or Administrator"
+          " permissions to approve requests.",
+          ephemeral=True,
       )
       return
 
     await interaction.response.defer()
 
-    # Step 1: Find the Roblox user ID from the username provided
     user_search_url = (
         f"https://users.roblox.com/v1/users/search?keyword={self.username}"
     )
@@ -79,9 +93,6 @@ class HighCommandReviewView(discord.ui.View):
       )
       return
 
-    # Step 2: Check or hit Roblox Open Cloud to post/verify join request queue
-    # Note: Roblox Open Cloud v2 requires the user to already have an active join request
-    # in the group to accept them via API. Let's list pending requests to find their specific path.
     requests_url = (
         f"https://apis.roblox.com/cloud/v2/groups/{group_id}/join-requests"
     )
@@ -91,7 +102,6 @@ class HighCommandReviewView(discord.ui.View):
     target_request_path = None
     if get_reqs.status_code == 200:
       for req in get_reqs.json().get("groupJoinRequests", []):
-        # req['user'] looks like 'users/12345678'
         if req.get("user", "").endswith(str(roblox_user_id)):
           target_request_path = req.get("path")
           break
@@ -105,7 +115,6 @@ class HighCommandReviewView(discord.ui.View):
       )
       return
 
-    # Step 3: Accept via Open Cloud v2 endpoint
     accept_url = f"https://apis.roblox.com/cloud/v2/{target_request_path}:accept"
     accept_headers = {
         "x-api-key": ROBLOX_API_KEY,
@@ -124,8 +133,8 @@ class HighCommandReviewView(discord.ui.View):
     if response.status_code == 200:
       await interaction.followup.send(
           f"Successfully approved and admitted **{self.username}** into"
-          f" **{self.group_name}** ({self.division} / {self.company}) by High"
-          f" Command {interaction.user.mention}!",
+          f" **{self.group_name}** ({self.division} / {self.company}) by"
+          f" {interaction.user.mention}!",
           ephemeral=False,
       )
     else:
@@ -141,9 +150,18 @@ class HighCommandReviewView(discord.ui.View):
   async def deny_request(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
-    if not interaction.user.guild_permissions.manage_roles:
+    config = SERVER_CONFIGS.get(interaction.guild_id, {})
+    accepter_role_id = config.get("accepter_role")
+
+    has_permission = interaction.user.guild_permissions.administrator
+    if accepter_role_id and not has_permission:
+      role = interaction.guild.get_role(accepter_role_id)
+      if role and role in interaction.user.roles:
+        has_permission = True
+
+    if not has_permission:
       await interaction.response.send_message(
-          "Only High Command can manage requests.", ephemeral=True
+          "You do not have permission to manage requests.", ephemeral=True
       )
       return
 
@@ -164,9 +182,64 @@ class HighCommandReviewView(discord.ui.View):
     )
 
 
+# Admin Setup Commands
+@bot.tree.command(
+    name="setup-requester-role",
+    description="Set the role allowed to submit group requests (Admin only).",
+)
+@app_commands.default_permissions(administrator=True)
+async def setup_requester_role(
+    interaction: discord.Interaction, role: discord.Role
+):
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["requester_role"] = role.id
+  await interaction.response.send_message(
+      f"✅ Group Requester role successfully set to {role.mention}.",
+      ephemeral=True,
+  )
+
+
+@bot.tree.command(
+    name="setup-accepter-role",
+    description="Set the role allowed to approve/deny requests (Admin only).",
+)
+@app_commands.default_permissions(administrator=True)
+async def setup_accepter_role(
+    interaction: discord.Interaction, role: discord.Role
+):
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["accepter_role"] = role.id
+  await interaction.response.send_message(
+      f"✅ Group Accepter role successfully set to {role.mention}.",
+      ephemeral=True,
+  )
+
+
+@bot.tree.command(
+    name="setup-channel",
+    description=(
+        "Set the designated channel where group requests will be sent (Admin"
+        " only)."
+    ),
+)
+@app_commands.default_permissions(administrator=True)
+async def setup_channel(
+    interaction: discord.Interaction, channel: discord.TextChannel
+):
+  if interaction.guild_id not in SERVER_CONFIGS:
+    SERVER_CONFIGS[interaction.guild_id] = {}
+  SERVER_CONFIGS[interaction.guild_id]["target_channel"] = channel.id
+  await interaction.response.send_message(
+      f"✅ Group request logs channel successfully set to {channel.mention}.",
+      ephemeral=True,
+  )
+
+
 @bot.tree.command(
     name="grouprequest",
-    description="Submit a tryout completion log for High Command review.",
+    description="Submit a tryout completion log for review.",
 )
 @app_commands.choices(
     branch=[
@@ -188,6 +261,24 @@ async def grouprequest(
     notes: str,
     proof: discord.Attachment,
 ):
+  config = SERVER_CONFIGS.get(interaction.guild_id, {})
+  requester_role_id = config.get("requester_role")
+
+  # Permission verification for submission
+  can_submit = interaction.user.guild_permissions.administrator
+  if requester_role_id and not can_submit:
+    role = interaction.guild.get_role(requester_role_id)
+    if role and role in interaction.user.roles:
+      can_submit = True
+
+  if not can_submit:
+    await interaction.response.send_message(
+        "You do not have the required Group Requester role to submit tryout"
+        " logs.",
+        ephemeral=True,
+    )
+    return
+
   await interaction.response.defer(ephemeral=True)
 
   embed = discord.Embed(
@@ -214,11 +305,18 @@ async def grouprequest(
       instructor=interaction.user,
   )
 
-  # Send the log embed into the current channel (or designate a logging channel ID if preferred)
-  await interaction.channel.send(embed=embed, view=view)
+  # Determine destination channel (uses configured channel or falls back to current channel)
+  target_channel_id = config.get("target_channel")
+  dest_channel = (
+      interaction.guild.get_channel(target_channel_id)
+      if target_channel_id
+      else interaction.channel
+  )
+
+  await dest_channel.send(embed=embed, view=view)
   await interaction.followup.send(
-      "Your tryout request log has been successfully published for High Command"
-      " review!",
+      f"Your tryout request log has been successfully published to"
+      f" {dest_channel.mention} for review!",
       ephemeral=True,
   )
 
@@ -226,7 +324,7 @@ async def grouprequest(
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Tryout Log Bot Online!")
+  print(f"Logged in as {bot.user} - Setup & Multi-group Bot Online!")
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
