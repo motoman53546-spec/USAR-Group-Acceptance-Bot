@@ -97,15 +97,27 @@ class HighCommandReviewView(discord.ui.View):
 
     headers = {"x-api-key": ROBLOX_API_KEY}
 
-    roles_url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
-    roles_resp = requests.get(roles_url)
+    # Fetch group roles to find the exact numerical ID matching the rank name
+    roles_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
+    roles_resp = requests.get(roles_url, headers=headers)
     target_role_id = None
 
     if roles_resp.status_code == 200:
-      for r in roles_resp.json().get("roles", []):
-        if r.get("name").lower() == self.rank.lower():
-          target_role_id = r.get("id")
+      for r in roles_resp.json().get("groupRoles", []):
+        if r.get("displayName", "").lower() == self.rank.lower():
+          path_parts = r.get("path", "").split("/")
+          target_role_id = path_parts[-1] if path_parts else None
           break
+
+    # Fallback to public v1 roles endpoint if v2 didn't return roles directly
+    if not target_role_id:
+      v1_roles_url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
+      v1_resp = requests.get(v1_roles_url)
+      if v1_resp.status_code == 200:
+        for r in v1_resp.json().get("roles", []):
+          if r.get("name", "").lower() == self.rank.lower():
+            target_role_id = str(r.get("id"))
+            break
 
     member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
     member_resp = requests.get(member_url, headers=headers)
@@ -129,7 +141,7 @@ class HighCommandReviewView(discord.ui.View):
           return
       else:
         await interaction.followup.send(
-            f"⚠️ Could not find exact Roblox role ID for `{self.rank}` in"
+            f"⚠️ Could not find exact Roblox role ID for rank `{self.rank}` in"
             " group.",
             ephemeral=True,
         )
@@ -299,9 +311,28 @@ async def rank_autocomplete(
     return []
 
   group_id = COMMAND_IDS[command_val]
+  headers = {"x-api-key": ROBLOX_API_KEY} if ROBLOX_API_KEY else {}
+
+  # Try Cloud API v2 first for autocomplete roles
   try:
-    url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
-    resp = requests.get(url, timeout=5)
+    url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/roles"
+    resp = requests.get(url, headers=headers, timeout=5)
+    if resp.status_code == 200:
+      roles = resp.json().get("groupRoles", [])
+      choices = []
+      for role in roles:
+        name = role.get("displayName") or role.get("name")
+        if name and current.lower() in name.lower():
+          choices.append(app_commands.Choice(name=name, value=name))
+      if choices:
+        return choices[:25]
+  except Exception:
+    pass
+
+  # Fallback to public v1 groups API if v2 fails or key lacks permission
+  try:
+    v1_url = f"https://groups.roblox.com/v1/groups/{group_id}/roles"
+    resp = requests.get(v1_url, timeout=5)
     if resp.status_code == 200:
       roles = resp.json().get("roles", [])
       choices = [
@@ -312,6 +343,7 @@ async def rank_autocomplete(
       return choices[:25]
   except Exception:
     pass
+
   return []
 
 
@@ -630,7 +662,8 @@ async def grouprequest(
 async def on_ready():
   await bot.tree.sync()
   print(
-      f"Logged in as {bot.user} - Group Request Logs & Parameter Order Fixed!"
+      f"Logged in as {bot.user} - Dual Cloud/Public API Role Pull & Request Logs"
+      " Online!"
   )
 
 
