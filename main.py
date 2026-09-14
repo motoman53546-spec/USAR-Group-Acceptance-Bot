@@ -1,5 +1,5 @@
-import os
 from datetime import datetime, timezone
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -32,6 +32,96 @@ def check_accepter_permission(interaction: discord.Interaction) -> bool:
     if role and role in interaction.user.roles:
       has_permission = True
   return has_permission
+
+
+async def fetch_security_background_check(
+    guild: discord.Guild,
+    discord_member: discord.Member,
+    username: str,
+    roblox_user_id: int,
+    group_id: str,
+) -> dict:
+  """Performs an in-depth security evaluation resembling high-end bot frameworks."""
+  data = {}
+
+  # 1. Roblox Identity & Account Age Check
+  try:
+    user_info_url = f"https://users.roblox.com/v1/users/{roblox_user_id}"
+    user_resp = requests.get(user_info_url, timeout=5)
+    if user_resp.status_code == 200:
+      u_json = user_resp.json()
+      created_str = u_json.get("created", "")
+      data["roblox_display"] = u_json.get("displayName", username)
+      data["roblox_name"] = u_json.get("name", username)
+      if created_str:
+        dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+        age_days = (datetime.now(timezone.utc) - dt).days
+        data["account_age_days"] = age_days
+      else:
+        data["account_age_days"] = 0
+    else:
+      data["account_age_days"] = 0
+  except Exception:
+    data["account_age_days"] = 0
+
+  # Badges count check
+  try:
+    badges_url = f"https://badges.roblox.com/v1/users/{roblox_user_id}/badges?limit=10"
+    b_resp = requests.get(badges_url, timeout=5)
+    data["badges_earned"] = (
+        len(b_resp.json().get("data", [])) if b_resp.status_code == 200 else 0
+    )
+  except Exception:
+    data["badges_earned"] = 0
+
+  # Alias history check
+  try:
+    aliases_url = f"https://users.roblox.com/v1/users/{roblox_user_id}/username-history"
+    a_resp = requests.get(aliases_url, timeout=5)
+    if a_resp.status_code == 200:
+      history = a_resp.json().get("data", [])
+      data["aliases"] = (
+          [h.get("name") for h in history] if history else ["None"]
+      )
+    else:
+      data["aliases"] = ["None"]
+  except Exception:
+    data["aliases"] = ["None"]
+
+  # 2. Group Status & Rank Check (V1/V2 info)
+  try:
+    group_roles_url = (
+        f"https://groups.roblox.com/v1/users/{roblox_user_id}/groups/roles"
+    )
+    g_resp = requests.get(group_roles_url, timeout=5)
+    current_rank = "Guest / Unranked"
+    if g_resp.status_code == 200:
+      for g in g_resp.json().get("data", []):
+        if str(g.get("group", {}).get("id")) == str(group_id):
+          current_rank = g.get("role", {}).get("name", "Member")
+          break
+    data["current_rank"] = current_rank
+  except Exception:
+    data["current_rank"] = "Unknown"
+
+  # Simulated XP tracking check placeholder (can be tied to your DB if applicable)
+  data["total_xp"] = 0
+
+  # 3. Discord Identity & Timestamps
+  data["discord_user"] = str(discord_member)
+  data["discord_created"] = discord_member.created_at
+  data["discord_joined"] = (
+      discord_member.joined_at if discord_member.joined_at else datetime.now(timezone.utc)
+  )
+  data["clearance_roles"] = [r.name for r in discord_member.roles if r.name != "@everyone"]
+
+  # Risk assessment calculation
+  risk = "GOOD (Low Risk)"
+  if data["account_age_days"] < 30:
+    risk = "CAUTION (New Account)"
+  data["risk_status"] = risk
+
+  return data
 
 
 class HighCommandReviewView(discord.ui.View):
@@ -437,9 +527,68 @@ async def grouprequest(
 
   await interaction.response.defer(ephemeral=True)
 
+  # Fetch Roblox ID first for background check embedding
+  user_search_url = (
+      f"https://users.roblox.com/v1/users/search?keyword={username}"
+  )
+  user_resp = requests.get(user_search_url)
+
+  if user_resp.status_code != 200 or not user_resp.json().get("data"):
+    await interaction.followup.send(
+        f"Failed to find Roblox user `{username}` via search API for security check.",
+        ephemeral=True,
+    )
+    return
+
+  user_data = user_resp.json()["data"][0]
+  roblox_user_id = user_data["id"]
+  group_id = COMMAND_IDS.get(command.name)
+
+  # Build the in-depth security background evaluation
+  bg = await fetch_security_background_check(
+      interaction.guild, interaction.user, username, roblox_user_id, group_id
+  )
+
+  # Format creation text metrics
+  created_years = round(bg["account_age_days"] / 365.25, 1)
+  roles_str = (
+      ", ".join([f"@{r}" for r in bg["clearance_roles"][:8]])
+      if bg["clearance_roles"]
+      else "@None"
+  )
+  aliases_formatted = (
+      ", ".join(bg["aliases"]) if bg["aliases"] else "No recorded name changes"
+  )
+  server_join_unix = (
+      int(bg["discord_joined"].timestamp()) if bg["discord_joined"] else int(datetime.now().timestamp())
+  )
+  discord_created_unix = (
+      int(bg["discord_created"].timestamp()) if bg["discord_created"] else int(datetime.now().timestamp())
+  )
+
+  security_text = (
+      f"**Status: {bg['risk_status']}**\n\n"
+      f"**Roblox Identity**\n"
+      f"• Profile: [{username}](https://www.roblox.com/users/{roblox_user_id}/profile)\n"
+      f"• ID: `{roblox_user_id}`\n"
+      f"• Account Age: ~{created_years} years ({bg['account_age_days']} days)\n"
+      f"• Badges Earned: {bg['badges_earned']}\n\n"
+      f"**Group Status**\n"
+      f"• Current Rank: {bg['current_rank']}\n"
+      f"• Total Recorded XP: {bg['total_xp']} XP\n\n"
+      f"**Discord Identity**\n"
+      f"• User: {interaction.user.mention}\n"
+      f"• Account Created: <t:{discord_created_unix}:R>\n"
+      f"• Server Join: <t:{server_join_unix}:R>\n\n"
+      f"**Clearance & Roles**\n"
+      f"{roles_str}\n\n"
+      f"**Alias History**\n"
+      f"{aliases_formatted}"
+  )
+
   review_embed = discord.Embed(
-      title="Tryout Proof / Group Acceptance Review",
-      description="A new tryout result has been submitted for High Command review.",
+      title=f"BACKGROUND CHECK: {username} Security Evaluation",
+      description=security_text,
       color=discord.Color.dark_red(),
       timestamp=datetime.now(timezone.utc),
   )
@@ -499,7 +648,7 @@ async def grouprequest(
       await logs_channel.send(embed=logs_embed)
 
   await interaction.followup.send(
-      f"Your tryout request log has been successfully published to"
+      f"Your tryout request log with full security evaluation has been successfully published to"
       f" {dest_channel.mention} for review!",
       ephemeral=True,
   )
@@ -593,7 +742,6 @@ async def changerank(
       "Content-Type": "application/json",
   }
 
-  # Check if member exists first; if not, check for join request and accept them
   member_resp = requests.get(member_url, headers=headers)
   if member_resp.status_code != 200:
     requests_url = (
@@ -762,7 +910,7 @@ async def on_ready():
   await bot.tree.sync()
   print(
       f"Logged in as {bot.user} - Added /changerank and /groupkick commands"
-      " with permission enforcement!"
+      " with security background checks!"
   )
 
 
