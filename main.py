@@ -35,7 +35,6 @@ def check_accepter_permission(interaction: discord.Interaction) -> bool:
 
 
 async def fetch_security_background_check(
-    guild: discord.Guild,
     discord_member: discord.Member,
     username: str,
     roblox_user_id: int,
@@ -81,14 +80,14 @@ async def fetch_security_background_check(
     if a_resp.status_code == 200:
       history = a_resp.json().get("data", [])
       data["aliases"] = (
-          [h.get("name") for h in history] if history else ["None"]
+          [h.get("name") for h in history] if history else ["No recorded name changes"]
       )
     else:
-      data["aliases"] = ["None"]
+      data["aliases"] = ["No recorded name changes"]
   except Exception:
-    data["aliases"] = ["None"]
+    data["aliases"] = ["No recorded name changes"]
 
-  # 2. Group Status & Rank Check (V1/V2 info)
+  # 2. Group Status & Rank Check
   try:
     group_roles_url = (
         f"https://groups.roblox.com/v1/users/{roblox_user_id}/groups/roles"
@@ -104,7 +103,6 @@ async def fetch_security_background_check(
   except Exception:
     data["current_rank"] = "Unknown"
 
-  # Simulated XP tracking check placeholder (can be tied to your DB if applicable)
   data["total_xp"] = 0
 
   # 3. Discord Identity & Timestamps
@@ -115,7 +113,6 @@ async def fetch_security_background_check(
   )
   data["clearance_roles"] = [r.name for r in discord_member.roles if r.name != "@everyone"]
 
-  # Risk assessment calculation
   risk = "GOOD (Low Risk)"
   if data["account_age_days"] < 30:
     risk = "CAUTION (New Account)"
@@ -209,17 +206,29 @@ class HighCommandReviewView(discord.ui.View):
             target_role_id = str(r.get("id"))
             break
 
-    member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
-    member_resp = requests.get(member_url, headers=headers)
+    # Fix Open Cloud v2 membership path resolution using memberships list
+    member_list_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships"
+    member_resp = requests.get(
+        member_list_url, headers=headers, params={"maxPageSize": 100}
+    )
 
+    target_membership_path = None
     if member_resp.status_code == 200:
+      for member in member_resp.json().get("groupMemberships", []):
+        if member.get("user", "").endswith(f"/{roblox_user_id}"):
+          target_membership_path = member.get("path")
+          break
+
+    patch_headers = {
+        "x-api-key": ROBLOX_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    if target_membership_path:
       if target_role_id:
-        patch_headers = {
-            "x-api-key": ROBLOX_API_KEY,
-            "Content-Type": "application/json",
-        }
+        update_url = f"https://apis.roblox.com/cloud/v2/{target_membership_path}"
         update_resp = requests.patch(
-            member_url,
+            update_url,
             headers=patch_headers,
             json={"role": f"groups/{group_id}/roles/{target_role_id}"},
         )
@@ -268,13 +277,20 @@ class HighCommandReviewView(discord.ui.View):
         )
         return
 
-      if target_role_id:
-        patch_headers = {
-            "x-api-key": ROBLOX_API_KEY,
-            "Content-Type": "application/json",
-        }
+      # Re-fetch membership path post-acceptance to apply rank
+      member_resp_retry = requests.get(
+          member_list_url, headers=headers, params={"maxPageSize": 100}
+      )
+      if member_resp_retry.status_code == 200:
+        for member in member_resp_retry.json().get("groupMemberships", []):
+          if member.get("user", "").endswith(f"/{roblox_user_id}"):
+            target_membership_path = member.get("path")
+            break
+
+      if target_membership_path and target_role_id:
+        update_url = f"https://apis.roblox.com/cloud/v2/{target_membership_path}"
         requests.patch(
-            member_url,
+            update_url,
             headers=patch_headers,
             json={"role": f"groups/{group_id}/roles/{target_role_id}"},
         )
@@ -527,7 +543,6 @@ async def grouprequest(
 
   await interaction.response.defer(ephemeral=True)
 
-  # Fetch Roblox ID first for background check embedding
   user_search_url = (
       f"https://users.roblox.com/v1/users/search?keyword={username}"
   )
@@ -544,12 +559,10 @@ async def grouprequest(
   roblox_user_id = user_data["id"]
   group_id = COMMAND_IDS.get(command.name)
 
-  # Build the in-depth security background evaluation
   bg = await fetch_security_background_check(
-      interaction.guild, interaction.user, username, roblox_user_id, group_id
+      interaction.user, username, roblox_user_id, group_id
   )
 
-  # Format creation text metrics
   created_years = round(bg["account_age_days"] / 365.25, 1)
   roles_str = (
       ", ".join([f"@{r}" for r in bg["clearance_roles"][:8]])
@@ -566,7 +579,19 @@ async def grouprequest(
       int(bg["discord_created"].timestamp()) if bg["discord_created"] else int(datetime.now().timestamp())
   )
 
+  # Tryout proof / review info placed at the very top of the embed description
   security_text = (
+      f"**Tryout Proof / Group Acceptance Review**\n"
+      f"A new tryout result has been submitted for High Command review.\n\n"
+      f"• **Attendee Username:** {username}\n"
+      f"• **Command:** {command.name}\n"
+      f"• **Division:** {division}\n"
+      f"• **Target Rank:** {rank}\n"
+      f"• **Company:** {company}\n"
+      f"• **Notes / Result:** {notes}\n"
+      f"• **Requested By:** {interaction.user.mention}\n\n"
+      f"---------------------------------------------------\n\n"
+      f"**BACKGROUND CHECK: {username} Security Evaluation**\n"
       f"**Status: {bg['risk_status']}**\n\n"
       f"**Roblox Identity**\n"
       f"• Profile: [{username}](https://www.roblox.com/users/{roblox_user_id}/profile)\n"
@@ -587,19 +612,10 @@ async def grouprequest(
   )
 
   review_embed = discord.Embed(
-      title=f"BACKGROUND CHECK: {username} Security Evaluation",
+      title=f"Tryout Proof / Group Acceptance Review",
       description=security_text,
       color=discord.Color.dark_red(),
       timestamp=datetime.now(timezone.utc),
-  )
-  review_embed.add_field(name="Attendee Username", value=username, inline=True)
-  review_embed.add_field(name="Command", value=command.name, inline=True)
-  review_embed.add_field(name="Division", value=division, inline=True)
-  review_embed.add_field(name="Target Rank", value=rank, inline=True)
-  review_embed.add_field(name="Company", value=company, inline=True)
-  review_embed.add_field(name="Notes / Result", value=notes, inline=False)
-  review_embed.add_field(
-      name="Requested By", value=interaction.user.mention, inline=True
   )
   review_embed.set_image(url=proof.url)
   review_embed.set_footer(text="Waiting for High Command Approval...")
@@ -736,14 +752,23 @@ async def changerank(
     )
     return
 
-  member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
+  member_list_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships"
+  member_resp = requests.get(
+      member_list_url, headers=headers, params={"maxPageSize": 100}
+  )
+  target_membership_path = None
+  if member_resp.status_code == 200:
+    for member in member_resp.json().get("groupMemberships", []):
+      if member.get("user", "").endswith(f"/{roblox_user_id}"):
+        target_membership_path = member.get("path")
+        break
+
   patch_headers = {
       "x-api-key": ROBLOX_API_KEY,
       "Content-Type": "application/json",
   }
 
-  member_resp = requests.get(member_url, headers=headers)
-  if member_resp.status_code != 200:
+  if not target_membership_path:
     requests_url = (
         f"https://apis.roblox.com/cloud/v2/groups/{group_id}/join-requests"
     )
@@ -776,8 +801,24 @@ async def changerank(
       )
       return
 
+    member_resp_retry = requests.get(
+        member_list_url, headers=headers, params={"maxPageSize": 100}
+    )
+    if member_resp_retry.status_code == 200:
+      for member in member_resp_retry.json().get("groupMemberships", []):
+        if member.get("user", "").endswith(f"/{roblox_user_id}"):
+          target_membership_path = member.get("path")
+          break
+
+  if not target_membership_path:
+    await interaction.followup.send(
+        "❌ Failed to locate membership resource path for the user.", ephemeral=True
+    )
+    return
+
+  update_url = f"https://apis.roblox.com/cloud/v2/{target_membership_path}"
   update_resp = requests.patch(
-      member_url,
+      update_url,
       headers=patch_headers,
       json={"role": f"groups/{group_id}/roles/{target_role_id}"},
   )
@@ -796,7 +837,7 @@ async def changerank(
   )
 
 
-# Direct Group Kick / Demotion Command (Bypasses Open Cloud DELETE error)
+# Direct Group Kick / Demotion Command
 @bot.tree.command(
     name="groupkick",
     description="Demote a member back to guest/unranked in a Roblox group.",
@@ -880,13 +921,30 @@ async def groupkick(
     )
     return
 
-  member_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships/{roblox_user_id}"
+  member_list_url = f"https://apis.roblox.com/cloud/v2/groups/{group_id}/memberships"
+  member_resp = requests.get(
+      member_list_url, headers=headers, params={"maxPageSize": 100}
+  )
+  target_membership_path = None
+  if member_resp.status_code == 200:
+    for member in member_resp.json().get("groupMemberships", []):
+      if member.get("user", "").endswith(f"/{roblox_user_id}"):
+        target_membership_path = member.get("path")
+        break
+
+  if not target_membership_path:
+    await interaction.followup.send(
+        f"❌ **{username}** is not an active member of this group.", ephemeral=True
+    )
+    return
+
+  update_url = f"https://apis.roblox.com/cloud/v2/{target_membership_path}"
   patch_headers = {
       "x-api-key": ROBLOX_API_KEY,
       "Content-Type": "application/json",
   }
   update_resp = requests.patch(
-      member_url,
+      update_url,
       headers=patch_headers,
       json={"role": f"groups/{group_id}/roles/{lowest_role_id}"},
   )
@@ -909,8 +967,8 @@ async def groupkick(
 async def on_ready():
   await bot.tree.sync()
   print(
-      f"Logged in as {bot.user} - Added /changerank and /groupkick commands"
-      " with security background checks!"
+      f"Logged in as {bot.user} - Reordered review embed so tryout proof/details"
+      " appear at the top!"
   )
 
 
