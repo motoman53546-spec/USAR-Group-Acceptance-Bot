@@ -70,21 +70,25 @@ async def scan_discharge_records(
       content = message.content
       content_lower = content.lower()
 
-      # Check for structured matches like "Name: username" or raw mentions/IDs
       is_match = False
+
+      # 1. Check if the exact Discord ID is mentioned
       if target_discord_id in content_lower:
         is_match = True
       else:
-        # Check line by line to see if "name:" or similar tags match the username
+        # 2. Parse line by line to handle formats like "Name: wddwadadwad22" or similar fields
         for line in content.split("\n"):
-          line_lower = line.lower().strip()
-          if target_username in line_lower:
-            # Verify if it's explicitly tied to a name or discharge field
-            if "name:" in line_lower or target_username == line_lower.replace("name:", "").strip():
+          # Clean markdown characters like asterisks, backticks, or bullets
+          clean_line = line.replace("*", "").replace("`", "").replace("•", "").lower().strip()
+          
+          # Check if the line mentions the target username
+          if target_username in clean_line:
+            # If it has a prefix tag or is a direct match
+            if "name" in clean_line or "user" in clean_line or target_username == clean_line.replace("name:", "").strip():
               is_match = True
               break
-            # Fallback if the raw username is mentioned broadly in the discharge record
-            elif target_username in line_lower:
+            # Fallback: if the username appears anywhere substantial on that line
+            elif len(target_username) >= 3 and target_username in clean_line:
               is_match = True
               break
 
@@ -92,7 +96,6 @@ async def scan_discharge_records(
         match_count += 1
         if not latest_match_text:
           timestamp_str = f"<t:{int(message.created_at.timestamp())}:R>"
-          # Extract a clean preview snippet from the message if possible
           preview_lines = [line.strip() for line in content.split("\n") if line.strip()]
           snippet = " | ".join(preview_lines[:2]) if preview_lines else "Discharge log found."
           if len(snippet) > 80:
@@ -102,7 +105,8 @@ async def scan_discharge_records(
     discharge_data["count"] = match_count
     if match_count > 0:
       discharge_data["recent_log"] = f"⚠️ **{match_count} Discharge Record(s) Found!**\n{latest_match_text}"
-  except Exception:
+  except Exception as e:
+    print(f"Error scanning discharge records: {e}")
     discharge_data["recent_log"] = "Error scanning discharge channel history."
 
   return discharge_data
@@ -846,16 +850,20 @@ async def changerank(
         return
 
   await interaction.followup.send(
-      f"✅ Successfully updated **{username}'s** ranks in **{command.name}** "
-      f"(Main Rank: {main_rank} | Division: {division.name} - {division_rank})!",
-      ephemeral=False,
+      f"Successfully updated **{username}'s** rank to Main: **{main_rank}** | Division: **{division.name} ({division_rank})**!",
+      ephemeral=True,
   )
 
 
 @bot.event
 async def on_ready():
-  await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Discharge structured scanner active!")
+  print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+  try:
+    synced = await bot.tree.sync()
+    print(f"Synced {len(synced)} command(s).")
+  except Exception as e:
+    print(f"Failed to sync commands: {e}")
 
 
+# Replace with your actual bot token from environment variables or string
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
