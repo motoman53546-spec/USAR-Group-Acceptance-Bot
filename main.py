@@ -48,7 +48,7 @@ def check_accepter_permission(interaction: discord.Interaction) -> bool:
 async def scan_discharge_records(
     guild: discord.Guild, username: str, discord_member: discord.Member
 ) -> dict:
-  """Scans the discharge channel for historical records matching the user."""
+  """Scans the discharge channel for structured logs matching the user's name or Discord ID."""
   discharge_data = {"count": 0, "recent_log": "No recorded discharges found."}
 
   channel = guild.get_channel(DISCHARGE_CHANNEL_ID)
@@ -62,15 +62,42 @@ async def scan_discharge_records(
     match_count = 0
     latest_match_text = None
     
+    target_username = username.lower().strip()
+    target_discord_id = str(discord_member.id)
+
     # Scan up to the last 250 messages in the discharge channel
     async for message in channel.history(limit=250):
-      content_lower = message.content.lower()
-      # Check if username or discord mention/ID is referenced in the discharge log
-      if (username.lower() in content_lower) or (str(discord_member.id) in content_lower):
+      content = message.content
+      content_lower = content.lower()
+
+      # Check for structured matches like "Name: username" or raw mentions/IDs
+      is_match = False
+      if target_discord_id in content_lower:
+        is_match = True
+      else:
+        # Check line by line to see if "name:" or similar tags match the username
+        for line in content.split("\n"):
+          line_lower = line.lower().strip()
+          if target_username in line_lower:
+            # Verify if it's explicitly tied to a name or discharge field
+            if "name:" in line_lower or target_username == line_lower.replace("name:", "").strip():
+              is_match = True
+              break
+            # Fallback if the raw username is mentioned broadly in the discharge record
+            elif target_username in line_lower:
+              is_match = True
+              break
+
+      if is_match:
         match_count += 1
         if not latest_match_text:
           timestamp_str = f"<t:{int(message.created_at.timestamp())}:R>"
-          latest_match_text = f"Most recent: {timestamp_str} ([Jump to Log]({message.jump_url}))"
+          # Extract a clean preview snippet from the message if possible
+          preview_lines = [line.strip() for line in content.split("\n") if line.strip()]
+          snippet = " | ".join(preview_lines[:2]) if preview_lines else "Discharge log found."
+          if len(snippet) > 80:
+            snippet = snippet[:77] + "..."
+          latest_match_text = f"Most recent ({timestamp_str}): *\"{snippet}\"* ([Jump to Log]({message.jump_url}))"
 
     discharge_data["count"] = match_count
     if match_count > 0:
@@ -793,7 +820,6 @@ async def changerank(
   # 1. Update Main Group Rank
   main_role_id = await get_target_role_id(main_group_id, main_rank)
   if not main_role_id:
-    await interaction.log_message(f"⚠️ Could not find exact Roblox role ID for Main Group rank `{main_rank}`.")
     await interaction.followup.send(
         f"⚠️ Could not find exact Roblox role ID for Main Group rank `{main_rank}`.",
         ephemeral=True,
@@ -829,7 +855,7 @@ async def changerank(
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Discharge scanner active!")
+  print(f"Logged in as {bot.user} - Discharge structured scanner active!")
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
