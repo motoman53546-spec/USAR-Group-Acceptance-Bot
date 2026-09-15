@@ -500,6 +500,7 @@ async def setup_acceptor_log_channel(interaction: discord.Interaction, channel: 
 async def grouprequest(
     interaction: discord.Interaction,
     username: str,
+    discord_id: str,
     command: app_commands.Choice[str],
     division: app_commands.Choice[str],
     main_rank: str,
@@ -536,6 +537,22 @@ async def grouprequest(
 
   await interaction.response.defer(ephemeral=True)
 
+  # Parse the Discord ID string and fetch the member/user
+  try:
+    user_id_int = int(discord_id.strip())
+    fetched_member = interaction.guild.get_member(user_id_int)
+    if not fetched_member:
+      fetched_member = await bot.fetch_user(user_id_int)
+  except ValueError:
+    fetched_member = None
+
+  if not fetched_member:
+    await interaction.followup.send(
+        f"❌ Could not find a Discord user matching ID `{discord_id}`. Please check the ID and try again.",
+        ephemeral=True,
+    )
+    return
+
   user_search_url = f"https://users.roblox.com/v1/users/search?keyword={username}"
   user_resp = requests.get(user_search_url)
 
@@ -551,7 +568,7 @@ async def grouprequest(
   group_id = COMMAND_IDS[command.name]["main_id"]
 
   bg = await fetch_security_background_check(
-      interaction.user, username, roblox_user_id, group_id
+      fetched_member, username, roblox_user_id, group_id
   )
 
   created_years = round(bg["account_age_days"] / 365.25, 1)
@@ -593,7 +610,7 @@ async def grouprequest(
       f"• Current Rank: {bg['current_rank']}\n"
       f"• Total Recorded XP: {bg['total_xp']} XP\n\n"
       f"**Discord Identity**\n"
-      f"• User: {interaction.user.mention}\n"
+      f"• User: {fetched_member.mention}\n"
       f"• Account Created: <t:{discord_created_unix}:R>\n"
       f"• Server Join: <t:{server_join_unix}:R>\n\n"
       f"**Clearance & Roles**\n"
@@ -641,7 +658,8 @@ async def grouprequest(
           timestamp=datetime.now(timezone.utc),
       )
       logs_embed.add_field(name="Instructor / Staff", value=interaction.user.mention, inline=True)
-      logs_embed.add_field(name="Attendee", value=username, inline=True)
+      logs_embed.add_field(name="Attendee Discord", value=fetched_member.mention, inline=True)
+      logs_embed.add_field(name="Attendee Roblox", value=username, inline=True)
       logs_embed.add_field(name="Command", value=command.name, inline=True)
       logs_embed.add_field(name="Division", value=division.name, inline=True)
       logs_embed.add_field(name="Main Rank", value=main_rank, inline=True)
@@ -655,7 +673,7 @@ async def grouprequest(
       await logs_channel.send(embed=logs_embed)
 
   await interaction.followup.send(
-      f"Your tryout request log with full security evaluation has been successfully published to {dest_channel.mention} for review!",
+      f"Your tryout request log with full security evaluation for {fetched_member.mention} has been successfully published to {dest_channel.mention} for review!",
       ephemeral=True,
   )
 
@@ -758,7 +776,7 @@ async def changerank(
 @bot.event
 async def on_ready():
   await bot.tree.sync()
-  print(f"Logged in as {bot.user} - Fully updated with Military Police Corps categories, main rank, and division rank arguments!")
+  print(f"Logged in as {bot.user} - Fully updated to accept Discord ID string inputs for background checks!")
 
 
 bot.run(os.getenv("DISCORD_BOT_TOKEN"))
